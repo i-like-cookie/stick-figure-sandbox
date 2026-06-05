@@ -15,6 +15,7 @@ needed. It's one self-contained file (all the graphics *and* sound are generated
 | 🔨 **Hammer** | Click to *BONK* — squashes a figure flat with stars and a screen-shake, then it pops back up dizzy and flees. |
 | ⚔️ **Saber** | A glowing, humming blade trails your cursor. **Swipe through** a figure to slice it into falling pieces. |
 | 🧺 **Food** | Drop snacks. Nearby figures wander over, munch, and bounce with little ❤️s. |
+| 🏷️ **Name** | Click a figure to nickname it. Type, hit Enter — they'll either **love it** (😍 + ❤️, the tag sticks) or **dislike it** and grab an eraser to wipe it out (😖). It's random — and **bad language is always rejected** (🤢, scrubbed out, never shown). |
 
 ## The twist: they fight back 🥊
 
@@ -28,6 +29,13 @@ weapon** — which can spark a whole brawl.
   drop it on their own after a bit.
 
 The population always tops itself back up, so the sandbox never empties out.
+
+## Name them 🏷️
+
+Give the little folks nicknames with the **Name** tool. Each one reacts in its own way —
+some are flattered, some are picky and erase whatever you wrote. Try anything rude and they'll
+recoil and scrub it out: the nickname box runs a leet-aware profanity filter (so `sh!t`, `a$$`,
+`f4ck` and friends don't get through) that still lets innocent names like *Spica* or *Cocker* by.
 
 ## Controls
 

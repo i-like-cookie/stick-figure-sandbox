@@ -41,6 +41,13 @@
     font-size: 12.5px; z-index: 10; pointer-events: none; box-shadow: 0 4px 14px rgba(0,0,0,.22);
     transition: opacity .5s; text-align: center; max-width: 92vw; }
   b.k { color: var(--accent); }
+
+  /* Floating nickname input */
+  #nameInput { position: fixed; display: none; z-index: 11; width: 124px; transform: translateX(-50%);
+    padding: 5px 9px; border-radius: 9px; border: 2px solid var(--accent); outline: none;
+    font: 600 13px -apple-system, system-ui, sans-serif; text-align: center; color: #20160a;
+    background: #fffdf3; box-shadow: 0 8px 20px rgba(0,0,0,.32); }
+  #nameInput::placeholder { color: #b3a98a; font-weight: 500; }
 </style>
 </head>
 <body>
@@ -52,13 +59,16 @@
   <button class="tool" data-tool="hammer"><span class="ic">🔨</span>Hammer</button>
   <button class="tool" data-tool="saber"><span class="ic">⚔️</span>Saber</button>
   <button class="tool" data-tool="food"><span class="ic">🧺</span>Food</button>
+  <button class="tool" data-tool="name"><span class="ic">🏷️</span>Name</button>
   <div id="palette"></div>
   <div class="sep"></div>
   <button class="mini" id="muteBtn" title="Toggle sound">🔊</button>
   <button class="mini" id="resetBtn" title="Reset world">🔄</button>
 </div>
 
-<div id="hint">Pick a tool above. <b class="k">Tip:</b> while holding the hammer or saber, the stick figures may leap up and <b class="k">snatch it</b> to bash each other — lift your cursor toward the top of the screen to keep it safe. Click an armed figure to grab it back.</div>
+<div id="hint">Pick a tool above. <b class="k">Tip:</b> while holding the hammer or saber, the stick figures may leap up and <b class="k">snatch it</b> to bash each other — lift your cursor toward the top of the screen to keep it safe. Click an armed figure to grab it back. With <b class="k">🏷️ Name</b>, click a figure to nickname it — they'll cheer or erase it!</div>
+
+<input id="nameInput" maxlength="14" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="name…" />
 
 <script>
 "use strict";
@@ -94,6 +104,7 @@ function resize() {
   paint = np; pctx = npc;
   // Keep figures above ground after a resize.
   for (const f of figures) if (f.onGround) f.y = Math.min(f.y, groundY);
+  if (namingFigure) positionNameInput(namingFigure);
 }
 window.addEventListener('resize', resize);
 
@@ -156,6 +167,23 @@ const Sound = {
   munch() { this.blip(rand(160, 220), 0.08, 'triangle', 0.16); setTimeout(() => this.blip(rand(140, 200), 0.07, 'triangle', 0.14), 90); },
   pop() { this.blip(rand(520, 720), 0.09, 'sine', 0.16); },
   whoosh() { this.blip(rand(300, 420), 0.12, 'sawtooth', 0.08); },
+  cheer() {  // happy ascending arpeggio when a nickname is liked
+    this.blip(523, 0.09, 'triangle', 0.16);
+    setTimeout(() => this.blip(659, 0.09, 'triangle', 0.16), 85);
+    setTimeout(() => this.blip(784, 0.13, 'triangle', 0.16), 170);
+  },
+  nope() {  // soft descending "meh" when a clean name is disliked
+    this.blip(330, 0.12, 'sawtooth', 0.12);
+    setTimeout(() => this.blip(233, 0.16, 'sawtooth', 0.12), 110);
+  },
+  buzz() {  // harsh rejection for bad language
+    if (!this.ctx || this.muted) return;
+    const t = this.ctx.currentTime;
+    const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+    o.type = 'square'; o.frequency.setValueAtTime(150, t); o.frequency.setValueAtTime(110, t + 0.13);
+    g.gain.setValueAtTime(0.16, t); g.gain.setValueAtTime(0.16, t + 0.24); g.gain.exponentialRampToValueAtTime(0.001, t + 0.34);
+    o.connect(g).connect(this.ctx.destination); o.start(t); o.stop(t + 0.36);
+  },
   startSaber() {
     if (!this.ctx || this.muted || this.saberOsc) return;
     const t = this.ctx.currentTime;
@@ -194,6 +222,8 @@ const mouse = { x: W / 2, y: H / 2, px: W / 2, py: H / 2, vx: 0, vy: 0,
 let dragged = null;           // figure currently held by the cursor
 let weaponStolen = false;     // is the player's current weapon snatched?
 let saberPrev = null;         // previous blade segment for swipe slicing
+let namingFigure = null;      // figure whose nickname box is currently open
+const NAME_MAX = 14;
 
 // ---------- Figure factory ----------
 let FIG_ID = 0;
@@ -220,6 +250,14 @@ function makeFigure(x, fromEdge) {
     dizzy: 0,                      // dizzy/star timer
     dead: false,                   // marked for removal; swept after the update loop
     spawnIn: fromEdge ? 1 : 0,     // little fade-in
+    // --- nicknames ---
+    name: null,                    // accepted nickname shown on a floating tag
+    naming: false,                 // true while its input box is open (figure frozen)
+    nameState: null,               // null | 'cheer' (liked) | 'reject' (erasing)
+    nameTimer: 0, nameRejectDur: 0,
+    pendingName: null,             // text shown while being erased
+    nameProfane: false,            // reject was due to bad language
+    erase: 0,                      // eraser sweep progress 0..1
   };
   pickWander(f);
   return f;
@@ -299,24 +337,30 @@ function update(dt) {
     f.sx += (1 - f.sx) * Math.min(1, dt * 10);
     f.sy += (1 - f.sy) * Math.min(1, dt * 10);
 
-    switch (f.state) {
-      case 'walk':       updateWalk(f, dt); break;
-      case 'idle':       updateIdle(f, dt); break;
-      case 'flee':       updateFlee(f, dt); break;
-      case 'leap':       updateLeap(f, dt); break;
-      case 'armed':      updateArmed(f, dt); break;
-      case 'squashed':   updateSquashed(f, dt); break;
-      case 'getup':      updateGetup(f, dt); break;
-      case 'ragdoll':    updateRagdoll(f, dt); break;
-      case 'eating':     updateEating(f, dt); break;
-      case 'dragged':    /* handled by pointer */ break;
-    }
+    if (f.naming) {
+      // frozen in place while its nickname box is open
+    } else if (f.nameState) {
+      updateNameReaction(f, dt);              // celebrate or erase the name
+    } else {
+      switch (f.state) {
+        case 'walk':       updateWalk(f, dt); break;
+        case 'idle':       updateIdle(f, dt); break;
+        case 'flee':       updateFlee(f, dt); break;
+        case 'leap':       updateLeap(f, dt); break;
+        case 'armed':      updateArmed(f, dt); break;
+        case 'squashed':   updateSquashed(f, dt); break;
+        case 'getup':      updateGetup(f, dt); break;
+        case 'ragdoll':    updateRagdoll(f, dt); break;
+        case 'eating':     updateEating(f, dt); break;
+        case 'dragged':    /* handled by pointer */ break;
+      }
 
-    // Reactions to a dangerous cursor (flee from held weapon) — only for calm walkers.
-    if ((f.state === 'walk' || f.state === 'idle') && !weaponStolen &&
-        (tool === 'hammer' || tool === 'saber') && mouse.inside) {
-      const d = dist(f.x, f.y - 40, mouse.x, mouse.y);
-      if (d < 95) startFlee(f);
+      // Reactions to a dangerous cursor (flee from held weapon) — only for calm walkers.
+      if ((f.state === 'walk' || f.state === 'idle') && !weaponStolen &&
+          (tool === 'hammer' || tool === 'saber') && mouse.inside) {
+        const d = dist(f.x, f.y - 40, mouse.x, mouse.y);
+        if (d < 95) startFlee(f);
+      }
     }
 
     // Player saber swipe-slicing.
@@ -428,8 +472,8 @@ function updateArmed(f, dt) {
   // find nearest non-armed victim
   let v = null, best = 1e9;
   for (const o of figures) {
-    // never target a figure that's held by the cursor, already armed, dead, or ragdolling
-    if (o === f || o.held || o.dead || o.state === 'ragdoll' || o.state === 'dragged') continue;
+    // never target a figure that's held by the cursor, being named/reacting, already armed, dead, or ragdolling
+    if (o === f || o.held || o.dead || o.naming || o.nameState || o.state === 'ragdoll' || o.state === 'dragged') continue;
     const d = Math.abs(o.x - f.x);
     if (d < best) { best = d; v = o; }
   }
@@ -466,6 +510,7 @@ function squashFigure(f) {
   if (f.dead || f.state === 'ragdoll') return;
   if (f.held === tool) weaponStolen = false;   // squashing a thief returns the player's tool
   f.held = null;
+  f.nameState = null; f.pendingName = null; f.erase = 0;   // a direct squash interrupts any name reaction
   f.sx = 1.8; f.sy = 0.22; f.state = 'squashed'; f.t = 0; f.vx = 0; f.vy = 0;
   f.onGround = true; f.y = groundY;
   burstStars(f.x, f.y - 10, 10);
@@ -482,6 +527,7 @@ function updateGetup(f, dt) {
 
 function sliceFigure(f) {
   if (f.dead || f.state === 'ragdoll') return;
+  if (f === namingFigure) cancelNaming();         // close its name box if it gets sliced
   // If this figure was carrying the player's current weapon, the player reclaims it.
   if (f.held === tool) weaponStolen = false;
   f.dead = true;                 // swept after the update loop (avoids mid-iteration splice)
@@ -519,6 +565,7 @@ function trySnatch(dt) {
   if (weaponStolen || dragged) return;
   if (!(tool === 'hammer' || tool === 'saber') || !mouse.inside) return;
   for (const f of figures) {
+    if (f.naming || f.nameState) continue;     // busy being nicknamed
     if (f.state !== 'walk' && f.state !== 'idle' && f.state !== 'flee') continue;
     if (f.cool > 0 || f.spawnIn > 0) continue;
     const horiz = Math.abs(mouse.x - f.x);
@@ -544,7 +591,7 @@ function updateFoods(dt) {
   }
   // figures seek nearest food
   for (const f of figures) {
-    if (f.dead) continue;
+    if (f.dead || f.naming || f.nameState) continue;
     if (f.state !== 'walk' && f.state !== 'idle') continue;
     let target = null, best = 240;
     for (const fd of foods) {
@@ -557,6 +604,84 @@ function updateFoods(dt) {
       if (Math.abs(target.x - f.x) > 14) { f.x += dir * 70 * dt; f.walk += dt * 11; f.state = 'walk'; }
       else { target.eaten = true; f.state = 'eating'; f.t = 0; burstHearts(f.x, f.y - 52, 4); Sound.munch(); }
     }
+  }
+}
+
+// ====================================================================
+//  NICKNAMES — profanity filter + reactions
+// ====================================================================
+// Balanced filter: common curses, vulgar slang, and slurs. Leet-speak aware
+// (f4ck, sh!t, a$$). Whole-token matching (suffix-tolerant) is the low-false-
+// positive workhorse; a per-word "stretchy" regex scan (f+u+c+k+) over the
+// separator-stripped string catches elongation ("fuuuck") and spaced/embedded
+// evasion ("f u c k"), guarded by an allow-list (e.g. shiitake, Scunthorpe).
+const LEET = { '@':'a','4':'a','3':'e','1':'i','!':'i','|':'i','0':'o','$':'s','5':'s','7':'t','+':'t','9':'g','8':'b','(':'c' };
+const deleet = s => s.toLowerCase().split('').map(c => LEET[c] !== undefined ? LEET[c] : c).join('');
+const lettersOnly = s => s.replace(/[^a-z]/g, '');
+const normLetters = s => lettersOnly(deleet(s));
+
+const BAD_BASE = ['fuck','fuk','fck','fuc','shit','shyt','sht','bitch','biatch','bastard','ass','asshole','arse','arsehole',
+  'dick','dickhead','prick','piss','cock','cocksucker','cunt','twat','wank','wanker','bollocks','bollock','bugger','slut',
+  'whore','hoe','skank','douche','douchebag','jackass','dumbass','badass','smartass','dipshit','bullshit','horseshit',
+  'dumbfuck','motherfucker','mofo','fucker','fuckface','fuckwit','fuckboy','fuckhead','shithead','shitface','shitbag',
+  'pussy','knob','knobhead','bellend','tosser','slag','jizz','cum','dildo','blowjob','handjob','boner','horny','milf',
+  'gangbang','orgy','pedo','paedo','pedophile','rape','rapist','molest','nutsack','ballsack','tit','tits','titty','boobs',
+  'penis','fag','faggot','nigger','nigga','niglet','dyke','retard','retarded','tard','spic','chink','gook','kike','wetback',
+  'beaner','coon','tranny','towelhead','raghead','paki','wop','dago','redskin','jap','honky'];
+// Unambiguous strings scanned anywhere (stretchy + leet). Short/ambiguous words
+// (ass, cock, dick, tit, fag, rape, cum) are deliberately whole-token only.
+const BAD_STRONG = ['fuck','fack','shit','bitch','cunt','asshole','bastard','pussy','whore','faggot','nigger','nigga','retard',
+  'wanker','bollocks','dipshit','bullshit','motherfuck','dumbfuck','cocksuck','dickhead','jackass','dumbass','douchebag'];
+// Clean words to protect from over-eager matching (substring scan + short-base suffixes).
+const BAD_ALLOW = ['shiitake','shitake','scunthorpe','retardant','spica','spicy','gookin','cocky','cocked','cocker','dicky'];
+const SUFFIXES = ['', 's','es','ed','er','ers','in','ing','y','a','hole','head','face','wad','bag','hat','z'];
+const STRONG_RE = BAD_STRONG.map(w => new RegExp(w.split('').map(c => c + '+').join('')));
+const ALLOW_N = BAD_ALLOW.map(normLetters).filter(Boolean);
+
+function tokenIsBad(tok) {
+  const n = normLetters(tok);
+  if (!n) return false;
+  if (ALLOW_N.includes(n)) return false;   // protect known-clean whole tokens (spicy, cocky, …)
+  for (const w of BAD_BASE) for (const sfx of SUFFIXES) if (n === w + sfx) return true;
+  return false;
+}
+function isProfane(raw) {
+  for (const tok of raw.split(/[^A-Za-z0-9@!|$+()]+/)) if (tok && tokenIsBad(tok)) return true;
+  let scan = normLetters(raw);                       // leet-mapped, letters only, separators gone
+  for (const a of ALLOW_N) scan = scan.split(a).join('.');   // protect known clean words
+  for (const re of STRONG_RE) if (re.test(scan)) return true;
+  return false;
+}
+function censorMask(name) {
+  const syms = '@#$%&!*', n = clamp(lettersOnly(name.toLowerCase()).length || 4, 3, 6);
+  let out = ''; for (let i = 0; i < n; i++) out += syms[(i * 3 + 1) % syms.length];
+  return out;
+}
+
+function startNameCheer(f) {
+  f.nameState = 'cheer'; f.nameTimer = 1.5; f.t = 0; f.sx = 1; f.sy = 1;
+  burstHearts(f.x, f.y - figHeight(f) - 10, 6);
+  Sound.cheer();
+}
+function startNameReject(f, name, profane) {
+  f.nameState = 'reject'; f.nameProfane = profane; f.name = null;
+  f.pendingName = profane ? censorMask(name) : name;
+  f.erase = 0; f.nameRejectDur = 1.7; f.nameTimer = 1.7; f.t = 0;
+  if (profane) Sound.buzz(); else Sound.nope();
+}
+// Drives the celebrate/erase animation; the figure is otherwise frozen.
+function updateNameReaction(f, dt) {
+  f.nameTimer -= dt;
+  if (f.nameState === 'cheer') {
+    const p = Math.sin(f.t * 14);                          // happy jelly bounce
+    f.sx = 1 + 0.10 * p; f.sy = 1 - 0.10 * p;
+    if (Math.random() < dt * 5) burstHearts(f.x, f.y - figHeight(f) - 12, 1);
+    if (f.nameTimer <= 0) { f.nameState = null; f.sx = 1; f.sy = 1; pickWander(f); }
+  } else {                                                  // 'reject': hold, then sweep the eraser
+    const dur = f.nameRejectDur || 1.7, elapsed = dur - f.nameTimer;
+    f.erase = clamp((elapsed - 0.4) / (dur - 0.4), 0, 1);
+    f.sx = 1 + 0.04 * Math.sin(f.t * 38);                  // annoyed shake
+    if (f.nameTimer <= 0) { f.nameState = null; f.pendingName = null; f.erase = 0; f.sx = 1; pickWander(f); }
   }
 }
 
@@ -680,6 +805,11 @@ function drawFigure(f) {
     ctx.fillText('😋', f.x, f.y - h - 8); ctx.restore();
   }
 
+  // nickname tag + naming reaction face
+  if (f.name || f.nameState === 'reject') drawNameTag(f);
+  if (f.nameState === 'cheer') reactionFace(f, '😍');
+  else if (f.nameState === 'reject') reactionFace(f, f.nameProfane ? '🤢' : '😖');
+
   function leg(topY, swing) {
     const kneeX = swing * 7, footX = swing * 13;
     ctx.beginPath(); ctx.moveTo(0, topY);
@@ -751,6 +881,53 @@ function drawDizzy(x, y, t) {
     ctx.fillStyle = '#ffd23f'; ctx.font = '11px serif'; ctx.textAlign = 'center';
     ctx.fillText('✦', Math.cos(a) * 11, Math.sin(a) * 5);
   }
+  ctx.restore();
+}
+
+function rrect(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);         ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function reactionFace(f, emoji) {
+  ctx.save(); ctx.font = '17px serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(emoji, f.x, f.y - figHeight(f) - 34); ctx.restore();
+}
+
+// Floating nickname label; during 'reject' an eraser sweeps it away left-to-right.
+function drawNameTag(f) {
+  let text, erase = 0, censored = false, reject = false;
+  if (f.nameState === 'reject') { text = f.pendingName; censored = f.nameProfane; reject = true; erase = clamp(f.erase, 0, 1); }
+  else if (f.name) { text = f.name; }
+  if (!text) return;
+
+  const yC = f.y - figHeight(f) - 16;
+  ctx.save();
+  ctx.font = '600 12px -apple-system, system-ui, sans-serif';
+  ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+  const tw = ctx.measureText(text).width;
+  const padX = 8, tagW = Math.max(26, tw + padX * 2), tagH = 18;
+  const cx = clamp(f.x, tagW / 2 + 4, W - tagW / 2 - 4);   // keep the whole tag on-screen
+  const left = cx - tagW / 2, top = yC - tagH / 2;
+
+  ctx.globalAlpha = reject ? (1 - erase * 0.2) : 1;
+  rrect(left, top, tagW, tagH, 6);
+  ctx.fillStyle = censored ? '#ffe0dc' : '#fffdf3'; ctx.fill();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = censored ? '#e0685b' : '#cdbf8f'; ctx.stroke();
+
+  // reveal only the part to the right of the eraser (left portion looks wiped)
+  const textLeft = cx - tw / 2, eraseX = textLeft + tw * erase;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(eraseX, top, (left + tagW) - eraseX, tagH); ctx.clip();
+  ctx.fillStyle = censored ? '#c0392b' : '#2a2433';
+  ctx.fillText(text, textLeft, yC + 0.5);
+  ctx.restore();
+
+  if (reject) { ctx.font = '15px serif'; ctx.textAlign = 'center'; ctx.fillText('🧽', eraseX, yC - 1); }
   ctx.restore();
 }
 
@@ -887,6 +1064,9 @@ cv.addEventListener('pointerdown', e => {
     if (!weaponStolen) { const f = figureAt(p.x, p.y, 30); if (f) sliceFigure(f); }
   } else if (tool === 'food') {
     dropFood(p.x, p.y);
+  } else if (tool === 'name') {
+    const f = figureAt(p.x, p.y, 30);
+    if (f) openNameInput(f); else cancelNaming();
   }
 });
 
@@ -939,6 +1119,44 @@ function tickDrag(dt) {
   f.walk += dt * 4;
 }
 
+// ----- nickname input box -----
+const nameInput = document.getElementById('nameInput');
+function positionNameInput(f) {
+  nameInput.style.left = clamp(f.x, 72, W - 72) + 'px';
+  nameInput.style.top  = clamp(f.y - figHeight(f) - 42, 8, H - 70) + 'px';
+}
+function openNameInput(f) {
+  if (namingFigure && namingFigure !== f) cancelNaming();
+  if (!f.onGround) { f.y = groundY; f.vy = 0; f.vx = 0; f.onGround = true; }   // reground if clicked mid-leap
+  namingFigure = f; f.naming = true; f.nameState = null;
+  positionNameInput(f);
+  nameInput.value = '';
+  nameInput.style.display = 'block';
+  setTimeout(() => nameInput.focus(), 0);
+}
+function cancelNaming() {
+  if (!namingFigure) return;
+  namingFigure.naming = false; namingFigure = null;
+  nameInput.style.display = 'none';
+}
+function commitName() {
+  if (!namingFigure) return;
+  const f = namingFigure;
+  const raw = nameInput.value.trim().replace(/\s+/g, ' ').slice(0, NAME_MAX);
+  f.naming = false; namingFigure = null;
+  nameInput.style.display = 'none';
+  if (!raw) return;                                     // empty -> no reaction
+  if (isProfane(raw)) startNameReject(f, raw, true);   // bad language -> always rejected
+  else if (Math.random() < 0.55) { f.name = raw; startNameCheer(f); }   // liked
+  else startNameReject(f, raw, false);                 // disliked -> show then erase
+}
+nameInput.addEventListener('keydown', e => {
+  e.stopPropagation();
+  if (e.key === 'Enter') { e.preventDefault(); commitName(); }
+  else if (e.key === 'Escape') { e.preventDefault(); cancelNaming(); }
+});
+nameInput.addEventListener('blur', () => { if (namingFigure) cancelNaming(); });
+
 // ====================================================================
 //  UI WIRING
 // ====================================================================
@@ -963,6 +1181,7 @@ document.querySelectorAll('.tool').forEach(btn => {
     document.querySelectorAll('.tool').forEach(b => b.classList.toggle('active', b === btn));
     palette.classList.toggle('show', tool === 'paint');
     recomputeWeaponStolen();          // re-arm the cursor unless a thief holds THIS tool
+    cancelNaming();                   // close any open nickname box
     if (dragged) { dragged.state = 'getup'; dragged = null; }
     Sound.ensure(); Sound.resume();
     if (tool === 'saber') Sound.startSaber(); else Sound.stopSaber();
@@ -976,6 +1195,7 @@ document.getElementById('muteBtn').addEventListener('click', () => {
   if (Sound.muted) Sound.stopSaber(); else if (tool === 'saber') { Sound.resume(); Sound.startSaber(); }
 });
 document.getElementById('resetBtn').addEventListener('click', () => {
+  cancelNaming();
   pctx.clearRect(0, 0, W, H);
   foods.length = 0; particles.length = 0; pendingSpawns = 0; weaponStolen = false; dragged = null;
   spawnInitial();
