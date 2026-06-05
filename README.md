@@ -16,6 +16,7 @@ needed. It's one self-contained file (all the graphics *and* sound are generated
 | ⚔️ **Saber** | A glowing, humming blade trails your cursor. **Swipe through** a figure to slice it into falling pieces. |
 | 🧺 **Food** | Drop snacks. Nearby figures wander over, munch, and bounce with little ❤️s. |
 | 🏷️ **Name** | Click a figure to nickname it. Type, hit Enter — they'll either **love it** (😍 + ❤️, the tag sticks) or **dislike it** and grab an eraser to wipe it out (😖). It's random — and **bad language is always rejected** (🤢, scrubbed out, never shown). |
+| ✏️ **Pencil** | Sketch a **weapon** anywhere — it drops to the ground for **The Chosen One 2.0** to grab and swing at the Dark Lord. |
 
 ## The twist: they fight back 🥊
 
@@ -36,6 +37,23 @@ Give the little folks nicknames with the **Name** tool. Each one reacts in its o
 some are flattered, some are picky and erase whatever you wrote. Try anything rude and they'll
 recoil and scrub it out: the nickname box runs a leet-aware profanity filter (so `sh!t`, `a$$`,
 `f4ck` and friends don't get through) that still lets innocent names like *Spica* or *Cocker* by.
+
+## The Chosen Ones vs. The Dark Lord ⚔️
+
+Three **special characters** roam the world — you'll spot them by their **open-circle heads** and
+permanent name tags:
+
+- 🖤 **The Chosen One** — fires **laser eyes** and **fire from his hands** when attacked.
+- 🧡 **The Chosen One 2.0** — **regenerates fast** and fights with **drawn weapons** (his own, or the
+  ones you sketch with the ✏️ Pencil).
+- ❤️ **The Dark Lord** — the villain. Every so often he goes on a **rampage** and charges The Chosen
+  One; the heroes blast and bash him until he's defeated. Everyone who falls **regenerates** and gets
+  back up (the Dark Lord and the black Chosen One take a few seconds; the orange 2.0 bounces back almost
+  instantly).
+
+They're **immune to your tools** — and if you try to attack one, or let the Dark Lord get to your
+cursor during a rampage, he'll **catch and erase your cursor** 💀. To get it back, **switch to another
+browser tab and come back**.
 
 ## Controls
 

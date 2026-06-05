@@ -48,6 +48,13 @@
     font: 600 13px -apple-system, system-ui, sans-serif; text-align: center; color: #20160a;
     background: #fffdf3; box-shadow: 0 8px 20px rgba(0,0,0,.32); }
   #nameInput::placeholder { color: #b3a98a; font-weight: 500; }
+
+  /* Cursor-erased banner */
+  #curseBanner { position: fixed; display: none; top: 64px; left: 50%; transform: translateX(-50%);
+    background: rgba(40,6,12,.92); color: #ffd9de; border: 1px solid #ff3b5c;
+    padding: 10px 18px; border-radius: 12px; z-index: 12; font-size: 14px; font-weight: 600;
+    box-shadow: 0 8px 26px rgba(0,0,0,.4); text-align: center; max-width: 92vw; line-height: 1.4; }
+  #curseBanner b { color: #ff8aa0; }
 </style>
 </head>
 <body>
@@ -60,15 +67,18 @@
   <button class="tool" data-tool="saber"><span class="ic">⚔️</span>Saber</button>
   <button class="tool" data-tool="food"><span class="ic">🧺</span>Food</button>
   <button class="tool" data-tool="name"><span class="ic">🏷️</span>Name</button>
+  <button class="tool" data-tool="pencil"><span class="ic">✏️</span>Pencil</button>
   <div id="palette"></div>
   <div class="sep"></div>
   <button class="mini" id="muteBtn" title="Toggle sound">🔊</button>
   <button class="mini" id="resetBtn" title="Reset world">🔄</button>
 </div>
 
-<div id="hint">Pick a tool above. <b class="k">Tip:</b> while holding the hammer or saber, the stick figures may leap up and <b class="k">snatch it</b> to bash each other — lift your cursor toward the top of the screen to keep it safe. Click an armed figure to grab it back. With <b class="k">🏷️ Name</b>, click a figure to nickname it — they'll cheer or erase it!</div>
+<div id="hint">Pick a tool above. <b class="k">Tip:</b> while holding the hammer or saber, the stick figures may leap up and <b class="k">snatch it</b> to bash each other — lift your cursor toward the top of the screen to keep it safe. Click an armed figure to grab it back. With <b class="k">🏷️ Name</b>, click a figure to nickname it. Watch for <b class="k">The Chosen One</b> &amp; <b class="k">The Dark Lord</b> — and use <b class="k">✏️ Pencil</b> to sketch weapons for The Chosen One 2.0. Don't let the Dark Lord catch your cursor!</div>
 
 <input id="nameInput" maxlength="14" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="name…" />
+
+<div id="curseBanner">💀 The Dark Lord erased your cursor!<br>Switch to <b>another browser tab</b> and back to get it back.</div>
 
 <script>
 "use strict";
@@ -201,9 +211,20 @@ const Sound = {
 };
 
 // ---------- Global state ----------
-const FIG_COLORS = ['#2b2b35', '#5b3a29', '#1f4f6b', '#6b1f4f', '#2f5f2f', '#5f4a1f'];
+// Vibrant palette for the ordinary stick folk.
+const FIG_COLORS = ['#ff2e63', '#1fa2ff', '#16d97a', '#ff9f1c', '#a14bff', '#ff5fae', '#10cfd6', '#ffd60a'];
 const PAINT_COLORS = ['#ff4d5e', '#ff9f1c', '#ffd23f', '#3ddc84', '#2aa8ff', '#9b5cff', '#ff6ec7', '#ffffff'];
-const TARGET_POP = 6;
+const NORMAL_POP = 5;        // ordinary figures (the 3 specials live on top of this)
+
+// The three special characters (open-circle heads, locked colours + names).
+const SPECIALS = {
+  chosen:   { color: '#0c0c16', name: 'The Chosen One',     regen: 5, hero: true,  power: 'blast' },
+  chosen2:  { color: '#ff7a14', name: 'The Chosen One 2.0', regen: 2, hero: true,  power: 'drawn' },
+  darklord: { color: '#ff1130', name: 'The Dark Lord',      regen: 5, hero: false, power: null   },
+};
+const DL_HP = 4;             // Dark Lord hit points per rampage
+const DL_PERIOD = 300;       // ~5 minutes between attacks
+const DL_FIRST = 25;         // first attack soon after load so it's seen
 
 let tool = 'drag';
 let paintColor = PAINT_COLORS[0];
@@ -211,10 +232,16 @@ let paintColor = PAINT_COLORS[0];
 const figures = [];
 const particles = [];
 const foods = [];
+const weapons = [];          // drawn weapons (player- or 2.0-sketched)
 let pendingSpawns = 0;        // figures queued to walk back in
 let spawnTimer = 0;
 
 let shake = 0;                // screen-shake magnitude
+
+// Battle refs + cursor-catch state
+let darkLordRef = null, chosenRef = null, chosen2Ref = null;
+let cursorErased = false, leftTab = false;   // Dark Lord can "erase" your cursor; tab away + back restores it
+let pencilPts = null;        // in-progress pencil stroke
 
 // Cursor / pointer
 const mouse = { x: W / 2, y: H / 2, px: W / 2, py: H / 2, vx: 0, vy: 0,
@@ -258,8 +285,29 @@ function makeFigure(x, fromEdge) {
     pendingName: null,             // text shown while being erased
     nameProfane: false,            // reject was due to bad language
     erase: 0,                      // eraser sweep progress 0..1
+    // --- special characters (heroes / villain) ---
+    special: null,                 // null | 'chosen' | 'chosen2' | 'darklord'
+    headOpen: false,               // open-circle head (specials)
+    permaName: false,              // locked colour + name tag (no repaint/rename)
+    hero: false, power: null,      // 'blast' (laser+fire) | 'drawn' (weapon)
+    down: false, regenT: 0, regenWait: 0, aura: 0,   // knocked-out / regenerating
+    sstate: 'wander',              // special sub-state
+    hp: 0, attackT: 0, rampageT: 0, targetId: null,  // Dark Lord combat
+    powerCool: 0, drawCool: 0, unleashT: 0, clashCool: 0, blastTargetX: 0,
+    heldWeapon: null, wtarget: 0, wT: 0,
   };
   pickWander(f);
+  return f;
+}
+function makeSpecial(key, x) {
+  const cfg = SPECIALS[key];
+  const f = makeFigure(x, false);
+  f.special = key; f.headOpen = true; f.permaName = true;
+  f.color = cfg.color; f.name = cfg.name; f.hero = cfg.hero; f.power = cfg.power;
+  f.regenWait = cfg.regen; f.sstate = 'wander';
+  f.hp = key === 'darklord' ? DL_HP : 0;
+  f.attackT = key === 'darklord' ? DL_FIRST : 0;
+  f.state = 'walk';
   return f;
 }
 function pickWander(f) {
@@ -268,9 +316,14 @@ function pickWander(f) {
   f.facing = f.target < f.x ? -1 : 1;
 }
 function spawnInitial() {
-  figures.length = 0;
-  for (let i = 0; i < TARGET_POP; i++) figures.push(makeFigure(rand(60, W - 60), false));
+  figures.length = 0; weapons.length = 0;
+  chosenRef  = makeSpecial('chosen',   W * 0.30);
+  chosen2Ref = makeSpecial('chosen2',  W * 0.50);
+  darkLordRef = makeSpecial('darklord', W * 0.72);
+  figures.push(chosenRef, chosen2Ref, darkLordRef);
+  for (let i = 0; i < NORMAL_POP; i++) figures.push(makeFigure(rand(60, W - 60), false));
 }
+function countNormals() { let n = 0; for (const f of figures) if (!f.special && !f.dead) n++; return n; }
 function queueRespawn(n = 1) { pendingSpawns += n; }
 
 // ---------- Particles ----------
@@ -337,7 +390,9 @@ function update(dt) {
     f.sx += (1 - f.sx) * Math.min(1, dt * 10);
     f.sy += (1 - f.sy) * Math.min(1, dt * 10);
 
-    if (f.naming) {
+    if (f.special) {
+      // movement + combat handled by updateBattle() after this loop
+    } else if (f.naming) {
       // frozen in place while its nickname box is open
     } else if (f.nameState) {
       updateNameReaction(f, dt);              // celebrate or erase the name
@@ -363,17 +418,21 @@ function update(dt) {
       }
     }
 
-    // Player saber swipe-slicing.
-    if (blade && f.state !== 'ragdoll' && cursorSpeed > 480 && f.spawnIn === 0) {
+    // Player saber swipe-slicing (specials are immune).
+    if (blade && !f.special && f.state !== 'ragdoll' && cursorSpeed > 480 && f.spawnIn === 0) {
       if (segDist(f.x, f.y - 36, blade.ax, blade.ay, blade.bx, blade.by) < 22) sliceFigure(f);
     }
 
     // keep on screen
-    f.x = clamp(f.x, 14, W - 14);
+    if (!f.special) f.x = clamp(f.x, 14, W - 14);
   }
 
   // Sweep out sliced figures now that iteration is done (no mutation mid-loop).
   for (let i = figures.length - 1; i >= 0; i--) if (figures[i].dead) figures.splice(i, 1);
+
+  // Heroes vs. villain + drawn weapons.
+  updateBattle(dt);
+  updateWeapons(dt);
 
   // Snatch logic: a calm figure may leap for the player's weapon.
   trySnatch(dt);
@@ -392,8 +451,8 @@ function update(dt) {
     if (p.t > p.life) particles.splice(i, 1);
   }
 
-  // ---- respawns to maintain population ----
-  if (figures.length + 0 < TARGET_POP && pendingSpawns <= 0) queueRespawn(TARGET_POP - figures.length);
+  // ---- respawns to maintain the ordinary population (specials never count/leave) ----
+  if (countNormals() + pendingSpawns < NORMAL_POP) queueRespawn(NORMAL_POP - countNormals() - pendingSpawns);
   if (pendingSpawns > 0) {
     spawnTimer -= dt;
     if (spawnTimer <= 0) {
@@ -472,8 +531,8 @@ function updateArmed(f, dt) {
   // find nearest non-armed victim
   let v = null, best = 1e9;
   for (const o of figures) {
-    // never target a figure that's held by the cursor, being named/reacting, already armed, dead, or ragdolling
-    if (o === f || o.held || o.dead || o.naming || o.nameState || o.state === 'ragdoll' || o.state === 'dragged') continue;
+    // never target a special, a held/named/reacting/armed/dead/ragdolling figure
+    if (o === f || o.special || o.held || o.dead || o.naming || o.nameState || o.state === 'ragdoll' || o.state === 'dragged') continue;
     const d = Math.abs(o.x - f.x);
     if (d < best) { best = d; v = o; }
   }
@@ -507,7 +566,7 @@ function recomputeWeaponStolen() {
 }
 
 function squashFigure(f) {
-  if (f.dead || f.state === 'ragdoll') return;
+  if (f.dead || f.special || f.state === 'ragdoll') return;   // specials are immune to player tools
   if (f.held === tool) weaponStolen = false;   // squashing a thief returns the player's tool
   f.held = null;
   f.nameState = null; f.pendingName = null; f.erase = 0;   // a direct squash interrupts any name reaction
@@ -526,7 +585,7 @@ function updateGetup(f, dt) {
 }
 
 function sliceFigure(f) {
-  if (f.dead || f.state === 'ragdoll') return;
+  if (f.dead || f.special || f.state === 'ragdoll') return;   // specials are immune to player tools
   if (f === namingFigure) cancelNaming();         // close its name box if it gets sliced
   // If this figure was carrying the player's current weapon, the player reclaims it.
   if (f.held === tool) weaponStolen = false;
@@ -565,7 +624,7 @@ function trySnatch(dt) {
   if (weaponStolen || dragged) return;
   if (!(tool === 'hammer' || tool === 'saber') || !mouse.inside) return;
   for (const f of figures) {
-    if (f.naming || f.nameState) continue;     // busy being nicknamed
+    if (f.special || f.naming || f.nameState) continue;   // specials + figures being nicknamed
     if (f.state !== 'walk' && f.state !== 'idle' && f.state !== 'flee') continue;
     if (f.cool > 0 || f.spawnIn > 0) continue;
     const horiz = Math.abs(mouse.x - f.x);
@@ -591,7 +650,7 @@ function updateFoods(dt) {
   }
   // figures seek nearest food
   for (const f of figures) {
-    if (f.dead || f.naming || f.nameState) continue;
+    if (f.dead || f.special || f.naming || f.nameState) continue;
     if (f.state !== 'walk' && f.state !== 'idle') continue;
     let target = null, best = 240;
     for (const fd of foods) {
@@ -605,6 +664,204 @@ function updateFoods(dt) {
       else { target.eaten = true; f.state = 'eating'; f.t = 0; burstHearts(f.x, f.y - 52, 4); Sound.munch(); }
     }
   }
+}
+
+// ====================================================================
+//  HEROES vs. THE DARK LORD  (the special characters)
+// ====================================================================
+const curseBanner = document.getElementById('curseBanner');
+
+function byId(id) { for (const f of figures) if (f.id === id) return f; return null; }
+function faceTo(f, x) { f.facing = x > f.x ? 1 : -1; }
+function nearestUpHero(from) {
+  let best = null, bd = 1e9;
+  for (const H of [chosenRef, chosen2Ref]) { if (!H || H.down) continue; const d = Math.abs(H.x - from.x); if (d < bd) { bd = d; best = H; } }
+  return best;
+}
+function wanderStep(f, dt, speed) {
+  if (f.wT <= 0 || Math.abs(f.x - f.wtarget) < 6) { f.wtarget = clamp(f.x + rand(-200, 200), 30, W - 30); f.wT = rand(1.5, 3.5); }
+  f.wT -= dt;
+  if (Math.abs(f.wtarget - f.x) > 4) { f.facing = f.wtarget > f.x ? 1 : -1; f.x += f.facing * speed * dt; f.walk += dt * 9; }
+}
+
+function updateBattle(dt) {
+  const DL = darkLordRef;
+  if (!DL) return;
+
+  // shared timers + regeneration for all three specials
+  for (const f of [chosenRef, chosen2Ref, DL]) {
+    if (!f) continue;
+    if (f.powerCool > 0) f.powerCool -= dt;
+    if (f.drawCool > 0) f.drawCool -= dt;
+    if (f.unleashT > 0) f.unleashT -= dt;
+    if (f.clashCool > 0) f.clashCool -= dt;
+    if (f.down) { f.regenT -= dt; f.aura = clamp(1 - f.regenT / f.regenWait, 0, 1); if (f.regenT <= 0) reviveSpecial(f); }
+  }
+
+  // --- The Dark Lord ---
+  if (!DL.down) {
+    DL.attackT -= dt;
+    if (DL.sstate === 'wander') {
+      wanderStep(DL, dt, 46);
+      if (DL.attackT <= 0) startRampage(DL);
+    } else {                                      // rampaging
+      DL.rampageT -= dt;
+      let tgt = byId(DL.targetId);
+      if (!tgt || tgt.down) { tgt = nearestUpHero(DL); DL.targetId = tgt ? tgt.id : null; }
+      if (DL.rampageT <= 0) endRampage(DL);
+      else if (tgt) {
+        faceTo(DL, tgt.x);
+        DL.x += DL.facing * 150 * dt; DL.walk += dt * 16;
+        if (Math.abs(tgt.x - DL.x) < 36 && DL.clashCool <= 0) resolveClash(DL, tgt);
+      }                                           // (no hero up: he waits for one to revive)
+      catchCursorIfNear(DL);
+      DL.swing *= Math.pow(0.02, dt);
+    }
+    DL.x = clamp(DL.x, 14, W - 14);
+  }
+
+  // --- the heroes ---
+  const rampaging = !DL.down && DL.sstate === 'charge';
+  for (const H of [chosenRef, chosen2Ref]) {
+    if (!H || H.down) continue;
+    if (rampaging) {
+      if (H.power === 'drawn') {                  // orange: get a weapon, charge in, bash
+        if (!H.heldWeapon) acquireWeapon(H, dt);
+        if (H.heldWeapon) {
+          faceTo(H, DL.x); H.sstate = 'charge';
+          if (Math.abs(DL.x - H.x) > 34) { H.x += H.facing * 130 * dt; H.walk += dt * 14; }
+          else if (H.clashCool <= 0) resolveClash(H, DL);
+        }
+      } else { H.sstate = 'brace'; faceTo(H, DL.x); }   // black: braces; blasts when the Dark Lord reaches it
+      H.swing *= Math.pow(0.02, dt);
+    } else {
+      H.sstate = 'wander'; wanderStep(H, dt, 52);
+    }
+    H.x = clamp(H.x, 14, W - 14);
+  }
+}
+
+function startRampage(DL) {
+  DL.sstate = 'charge'; DL.hp = DL_HP; DL.rampageT = 42; DL.clashCool = 0;
+  const t = nearestUpHero(DL); DL.targetId = t ? t.id : null;
+  flashHint('💀 The Dark Lord attacks The Chosen One!'); Sound.bonk();
+}
+function endRampage(DL) {
+  DL.sstate = 'wander'; DL.attackT = DL_PERIOD; DL.targetId = null;
+  // a hero still mid-charge drops its weapon to the ground (no frozen-arm glitch / stuck array entry)
+  for (const H of [chosenRef, chosen2Ref]) {
+    if (H && H.heldWeapon) {
+      const w = H.heldWeapon; H.heldWeapon = null; H.swing = 0; H.sstate = 'wander';
+      w.held = false; w.x = H.x; w.y = groundY - 2; w.onGround = true; w.vy = 0;
+    }
+  }
+}
+
+function resolveClash(a, b) {
+  const DL = a.special === 'darklord' ? a : b;
+  const H  = a.special === 'darklord' ? b : a;
+  if (!DL || !H || DL.down || H.down) return;
+  DL.clashCool = 0.8; H.clashCool = 0.8;
+  if (H.power === 'blast' && H.powerCool <= 0) heroBlast(H, DL);
+  else if (H.power === 'drawn' && H.heldWeapon) heroBash(H, DL);
+  DL.swing = 1;
+  knockDown(H);                                   // the Dark Lord strikes the hero down
+  if (DL.hp <= 0) defeatDarkLord(DL);
+}
+function heroBlast(H, DL) {                        // laser eyes + fire from the hands
+  DL.hp -= 2; H.powerCool = 6; H.unleashT = 0.9; H.blastTargetX = DL.x; H.sstate = 'blast';
+  const dir = DL.x > H.x ? 1 : -1;
+  for (let i = 0; i < 18; i++) addParticle({ kind: 'flame', x: H.x + dir * 13, y: H.y - 34 + rand(-4, 4),
+    vx: dir * rand(140, 360), vy: rand(-50, 50), life: rand(0.3, 0.7), size: rand(8, 16),
+    color: choice(['#ffe23a', '#ff8c1a', '#ff3b1a']), g: -40 });
+  shake = Math.max(shake, 11); Sound.slice();
+}
+function heroBash(H, DL) {                         // bash with a drawn weapon
+  DL.hp -= 1; const w = H.heldWeapon; H.heldWeapon = null;
+  const i = weapons.indexOf(w); if (i >= 0) weapons.splice(i, 1);
+  H.swing = 1; burstStars((H.x + DL.x) / 2, DL.y - 36, 6); shake = Math.max(shake, 8); Sound.bonk();
+}
+function knockDown(f) {
+  f.down = true; f.regenT = f.regenWait; f.aura = 0; f.sstate = 'down';
+  f.sx = 1.5; f.sy = 0.45; f.heldWeapon = null;
+  burstStars(f.x, f.y - 28, 8); shake = Math.max(shake, 10); Sound.bonk();
+}
+function reviveSpecial(f) {
+  f.down = false; f.sx = 1; f.sy = 1; f.aura = 0; f.sstate = 'wander';
+  f.powerCool = 0; f.clashCool = 0; f.unleashT = 0;   // ready to fight again (no post-revive no-op clash)
+  if (f.special === 'darklord') { f.hp = DL_HP; f.attackT = DL_PERIOD; f.targetId = null; }
+  for (let i = 0; i < 10; i++) addParticle({ kind: 'spark', x: f.x + rand(-10, 10), y: f.y - rand(10, 58),
+    vx: rand(-120, 120), vy: rand(-200, -40), life: rand(0.4, 0.8), size: rand(2, 4),
+    color: f.special === 'darklord' ? '#ff5a78' : '#9bf6ff', g: 200 });
+  Sound.pop();
+}
+function defeatDarkLord(DL) { knockDown(DL); flashHint('💥 The Chosen Ones defeated The Dark Lord!'); }
+
+// orange picks up the nearest grounded drawn weapon, or sketches his own
+function acquireWeapon(H, dt) {
+  let best = null, bd = 600;
+  for (const w of weapons) { if (w.held || !w.onGround) continue; const d = Math.abs(w.x - H.x); if (d < bd) { bd = d; best = w; } }
+  if (best) {
+    faceTo(H, best.x); H.sstate = 'fetch';
+    if (Math.abs(best.x - H.x) > 16) { H.x += H.facing * 120 * dt; H.walk += dt * 13; }
+    else { best.held = true; H.heldWeapon = best; }
+    return;
+  }
+  if (H.drawCool <= 0) {
+    const w = makeDrawnWeapon(H.x + H.facing * 14, groundY - 2, null);
+    w.held = true; H.heldWeapon = w; weapons.push(w);
+    H.drawCool = 4; H.sstate = 'draw'; pencilSparkle(H.x + H.facing * 14, H.y - 30);
+  }
+}
+function makeDrawnWeapon(x, y, pts) {
+  if (!pts) {                                     // auto-generated sword/club scribble
+    pts = []; const len = rand(26, 40);
+    for (let i = 0; i <= 6; i++) pts.push({ x: rand(-1.5, 1.5), y: -i / 6 * len });
+    pts.push({ x: -7, y: -len * 0.72 }); pts.push({ x: 7, y: -len * 0.72 });
+    pts.push({ x: 0, y: -len * 0.72 }); pts.push({ x: 0, y: -len });
+  }
+  let r = 8; for (const p of pts) r = Math.max(r, Math.hypot(p.x, p.y));
+  return { x, y, pts, r, held: false, onGround: true, vy: 0 };
+}
+function updateWeapons(dt) {
+  for (const w of weapons) {
+    if (w.held || w.onGround) continue;
+    w.vy += 1400 * dt; w.y += w.vy * dt;
+    if (w.y >= groundY - 2) { w.y = groundY - 2; w.onGround = true; w.vy = 0; }
+  }
+}
+
+// ----- cursor catch / erase (Dark Lord + retaliation) -----
+function catchCursor() {
+  if (cursorErased) return;
+  cursorErased = true; leftTab = false;
+  cv.style.cursor = 'none'; document.body.style.cursor = 'none';
+  if (curseBanner) curseBanner.style.display = 'block';
+  burstStars(mouse.x, mouse.y, 10); pencilSparkle(mouse.x, mouse.y); Sound.buzz();
+}
+function restoreCursor() {
+  if (!cursorErased) return;
+  cursorErased = false; cv.style.cursor = ''; document.body.style.cursor = '';
+  if (curseBanner) curseBanner.style.display = 'none';
+  burstStars(mouse.x, mouse.y, 6); flashHint('✨ Your cursor is back!');
+}
+function catchCursorIfNear(DL) {
+  if (cursorErased || !mouse.inside) return;
+  if (dist(mouse.x, mouse.y, DL.x, DL.y - 36) < 80) catchCursor();
+}
+function pencilSparkle(x, y) {
+  for (let i = 0; i < 7; i++) addParticle({ kind: 'spark', x, y, vx: rand(-80, 80), vy: rand(-130, -20), life: rand(0.3, 0.6), size: rand(2, 3), color: '#555', g: 300 });
+}
+function finishPencil() {
+  const pts = pencilPts; pencilPts = null;
+  if (!pts || pts.length < 2) return;
+  let cx = 0, cy = 0; for (const p of pts) { cx += p.x; cy += p.y; } cx /= pts.length; cy /= pts.length;
+  const local = pts.map(p => ({ x: p.x - cx, y: p.y - cy }));
+  const w = makeDrawnWeapon(cx, Math.min(cy, groundY - 2), local);
+  w.onGround = Math.abs(cy - (groundY - 2)) < 8;   // drawn near the ground? already there, else it drops
+  weapons.push(w);
+  while (weapons.length > 12) { const idx = weapons.findIndex(x => !x.held); if (idx < 0) break; weapons.splice(idx, 1); }
+  pencilSparkle(cx, cy); Sound.pop();
 }
 
 // ====================================================================
@@ -719,13 +976,24 @@ function render() {
     ctx.restore();
   }
 
-  // figures (sorted by x just for a touch of depth consistency)
+  // drawn weapons resting on the ground (behind the figures)
+  for (const w of weapons) if (!w.held) drawGroundWeapon(w);
+
+  // figures
   for (const f of figures) drawFigure(f);
 
   // particles
   for (const p of particles) drawParticle(p);
 
   ctx.restore();   // end shake
+
+  // in-progress pencil sketch (screen space)
+  if (pencilPts && pencilPts.length > 1) {
+    ctx.save(); ctx.strokeStyle = '#33333d'; ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.beginPath(); ctx.moveTo(pencilPts[0].x, pencilPts[0].y);
+    for (let i = 1; i < pencilPts.length; i++) ctx.lineTo(pencilPts[i].x, pencilPts[i].y);
+    ctx.stroke(); ctx.restore();
+  }
 
   // the tool the cursor is "holding"
   drawCursorTool();
@@ -752,8 +1020,10 @@ function drawClouds() {
 function drawFigure(f) {
   const h = figHeight(f);
   const headR = 9;
+  if (f.down) { drawDownSpecial(f); return; }   // knocked-out special, regenerating
   ctx.save();
   ctx.globalAlpha = f.spawnIn > 0 ? 1 - f.spawnIn : 1;
+  if (f.special) { ctx.shadowColor = f.color; ctx.shadowBlur = 8; }   // subtle aura on specials
 
   // pivot at the feet; squash/stretch + facing + tumble rotation
   ctx.translate(f.x, f.y);
@@ -780,17 +1050,15 @@ function drawFigure(f) {
   // ---- arms ----
   drawArms(f, shoulderY);
 
-  // ---- head ----
-  ctx.beginPath(); ctx.arc(0, headCY, headR, 0, 7); ctx.fillStyle = f.color; ctx.fill();
-  // simple face
-  ctx.fillStyle = '#fff';
-  const eyeY = headCY - 1;
-  ctx.beginPath(); ctx.arc(3, eyeY, 1.7, 0, 7); ctx.arc(-3, eyeY, 1.7, 0, 7); ctx.fill();
-  ctx.fillStyle = '#111';
-  const look = f.state === 'flee' ? 1.2 : 0.6;
-  ctx.beginPath(); ctx.arc(3 + look, eyeY, 0.9, 0, 7); ctx.arc(-3 + look, eyeY, 0.9, 0, 7); ctx.fill();
+  // ---- head (no eyes; specials get an open circle) ----
+  ctx.beginPath(); ctx.arc(0, headCY, headR, 0, 7);
+  if (f.headOpen) { ctx.lineWidth = 3; ctx.strokeStyle = f.color; ctx.stroke(); ctx.lineWidth = 4.2; }
+  else { ctx.fillStyle = f.color; ctx.fill(); }
 
   ctx.restore();
+
+  // hero laser-eye beams (screen space, after the body restore)
+  if (f.special === 'chosen' && f.unleashT > 0) drawLasers(f);
 
   // dizzy stars / panic mark (drawn unscaled, above head)
   if (f.dizzy > 0 && (f.state === 'getup' || f.state === 'squashed')) {
@@ -825,6 +1093,17 @@ function drawArms(f, shoulderY) {
     return { x: x2, y: y2 };
   };
 
+  if (f.special === 'chosen' && f.unleashT > 0) {
+    swingArm(1.55, 12, 13, 0.15); swingArm(1.95, 12, 13, 0.15);   // both arms thrust forward (fire)
+    return;
+  }
+  if (f.special && f.heldWeapon) {
+    swingArm(-2.5, 11, 12, -0.4);                                 // off-hand
+    const ang = lerp(2.2, 0.55, f.swing);                         // overhead -> swing down
+    const hand = swingArm(ang, 12, 13, 0.3);
+    drawHeldDrawnWeapon(hand.x, hand.y, ang, f.heldWeapon, f.facing);
+    return;
+  }
   if (f.state === 'dragged') {
     const fl = Math.sin(f.walk * 6) * 0.6;
     swingArm(2.4 + fl, 11, 12, 0.5); swingArm(-2.4 - fl, 11, 12, -0.5);
@@ -872,6 +1151,59 @@ function drawBlade(ax, ay, bx, by, color) {
   ctx.strokeStyle = '#eafff0'; ctx.lineWidth = 3;
   ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
   ctx.restore();
+}
+
+// The Chosen One's laser eyes — twin beams toward the Dark Lord.
+function drawLasers(f) {
+  const h = figHeight(f);
+  const ex = f.x + f.facing * 2, ey = f.y - h + 8;   // eye-line
+  const tx = f.blastTargetX, ty = f.y - 32;
+  const a = clamp(f.unleashT / 0.3, 0, 1);
+  const flick = 0.6 + 0.4 * Math.sin(f.unleashT * 70);
+  ctx.save(); ctx.lineCap = 'round'; ctx.globalAlpha = a;
+  ctx.shadowColor = '#ff2b4d'; ctx.shadowBlur = 12;
+  for (const off of [-4, 4]) {
+    ctx.strokeStyle = '#ff2e55'; ctx.lineWidth = 3 * flick;
+    ctx.beginPath(); ctx.moveTo(ex + off, ey); ctx.lineTo(tx, ty); ctx.stroke();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.1 * flick;
+    ctx.beginPath(); ctx.moveTo(ex + off, ey); ctx.lineTo(tx, ty); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// A knocked-out special, faded and crumpled, with a regeneration ring.
+function drawDownSpecial(f) {
+  ctx.save();
+  ctx.globalAlpha = 0.3 + 0.45 * f.aura;
+  ctx.translate(f.x, f.y);
+  ctx.scale(f.facing * 1.5, 0.5);
+  ctx.strokeStyle = f.color; ctx.fillStyle = f.color; ctx.lineWidth = 4.2; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.beginPath(); ctx.moveTo(-12, -4); ctx.lineTo(12, -4); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-10, -4); ctx.lineTo(-2, -14); ctx.moveTo(10, -4); ctx.lineTo(4, -15); ctx.stroke();
+  ctx.beginPath(); ctx.arc(-16, -5, 9, 0, 7);
+  if (f.headOpen) { ctx.lineWidth = 3; ctx.stroke(); } else ctx.fill();
+  ctx.restore();
+  ctx.save(); ctx.translate(f.x, f.y - 24); ctx.lineWidth = 3; ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(255,255,255,.4)'; ctx.beginPath(); ctx.arc(0, 0, 13, 0, 7); ctx.stroke();
+  ctx.strokeStyle = f.special === 'darklord' ? '#ff5066' : '#66e0ff';
+  ctx.beginPath(); ctx.arc(0, 0, 13, -Math.PI / 2, -Math.PI / 2 + f.aura * Math.PI * 2); ctx.stroke();
+  ctx.restore();
+  if (f.name) drawNameTag(f);
+}
+
+function drawHeldDrawnWeapon(x, y, ang, w, facing) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(-ang * facing - 0.3);
+  ctx.strokeStyle = '#33333d'; ctx.lineWidth = 3.5; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  const s = 0.7; ctx.beginPath();
+  for (let i = 0; i < w.pts.length; i++) { const px = w.pts[i].x * s, py = w.pts[i].y * s; i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py); }
+  ctx.stroke(); ctx.restore();
+}
+function drawGroundWeapon(w) {
+  ctx.save(); ctx.translate(w.x, w.y);
+  ctx.strokeStyle = '#33333d'; ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.beginPath();
+  for (let i = 0; i < w.pts.length; i++) { i === 0 ? ctx.moveTo(w.pts[i].x, w.pts[i].y) : ctx.lineTo(w.pts[i].x, w.pts[i].y); }
+  ctx.stroke(); ctx.restore();
 }
 
 function drawDizzy(x, y, t) {
@@ -942,6 +1274,9 @@ function drawParticle(p) {
     ctx.fillText('❤', 0, 0);
   } else if (p.kind === 'spark') {
     ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(0, 0, p.size, 0, 7); ctx.fill();
+  } else if (p.kind === 'flame') {
+    ctx.globalAlpha = a * 0.9; ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(0, 0, p.size * (0.55 + (1 - a) * 0.7), 0, 7); ctx.fill();
   } else if (p.kind === 'piece') {
     ctx.strokeStyle = p.color; ctx.fillStyle = p.color; ctx.lineWidth = 4.2; ctx.lineCap = 'round';
     if (p.piece === 'head') { ctx.beginPath(); ctx.arc(0, 0, 9, 0, 7); ctx.fill(); }
@@ -959,7 +1294,7 @@ function saberSegment(mx, my) {
 }
 
 function drawCursorTool() {
-  if (!mouse.inside) return;
+  if (!mouse.inside || cursorErased) return;
   const x = mouse.x, y = mouse.y;
   ctx.save();
   if (tool === 'paint') {
@@ -989,6 +1324,11 @@ function drawCursorTool() {
   } else if (tool === 'food') {
     ctx.font = '26px serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText('🧺', x + 14, y + 10);
+  } else if (tool === 'pencil') {
+    ctx.translate(x + 12, y + 12); ctx.rotate(-0.7);
+    ctx.strokeStyle = '#d9a441'; ctx.lineWidth = 5; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, 18); ctx.stroke();
+    ctx.fillStyle = '#33333d'; ctx.beginPath(); ctx.moveTo(-3, -2); ctx.lineTo(3, -2); ctx.lineTo(0, -9); ctx.fill();
   }
   ctx.restore();
 }
@@ -1036,7 +1376,13 @@ cv.addEventListener('pointermove', e => {
   mouse.dragVx = (mouse.dragVx || 0) * (1 - a) + ((p.x - mouse.x) / dtMove) * a;
   mouse.dragVy = (mouse.dragVy || 0) * (1 - a) + ((p.y - mouse.y) / dtMove) * a;
   mouse.lastMoveT = now;
-  if (tool === 'paint' && mouse.down) paintStroke(mouse.x, mouse.y, p.x, p.y);
+  if (!cursorErased && mouse.down) {
+    if (tool === 'paint') paintStroke(mouse.x, mouse.y, p.x, p.y);
+    else if (tool === 'pencil' && pencilPts) {
+      const last = pencilPts[pencilPts.length - 1];
+      if (Math.hypot(p.x - last.x, p.y - last.y) > 4) pencilPts.push({ x: p.x, y: p.y });
+    }
+  }
   mouse.x = p.x; mouse.y = p.y; mouse.inside = true;
 });
 cv.addEventListener('pointerleave', () => { mouse.inside = false; });
@@ -1047,17 +1393,28 @@ cv.addEventListener('pointerdown', e => {
   const p = pointerPos(e); mouse.x = p.x; mouse.y = p.y; mouse.px = p.x; mouse.py = p.y;
   mouse.down = true; mouse.inside = true;
   mouse.dragVx = 0; mouse.dragVy = 0; mouse.lastMoveT = performance.now();   // fresh velocity for this gesture
+  if (cursorErased) return;                       // cursor is gone — ignore until restored
 
-  // Reclaiming a stolen weapon: clicking an armed figure with any tool.
-  const armedHit = figureAt(p.x, p.y, 30);
-  if (armedHit && armedHit.held) { reclaim(armedHit); return; }
+  // Reclaiming a stolen weapon: prefer an actual armed (non-special) thief under the click,
+  // so a wandering special can't shadow the reclaim and erase the cursor instead.
+  let armedHit = null, ad = 30;
+  for (const f of figures) {
+    if (f.dead || f.special || !f.held || f.state === 'ragdoll') continue;
+    const d = dist(p.x, p.y - figHeight(f) * 0.5, f.x, f.y - figHeight(f) * 0.5);
+    if (d < ad) { ad = d; armedHit = f; }
+  }
+  if (armedHit) { reclaim(armedHit); return; }
+
+  // Attacking a special with an aggressive tool backfires — it catches your cursor.
+  const sp = figureAt(p.x, p.y, 30);
+  if (sp && sp.special && (tool === 'hammer' || tool === 'saber' || tool === 'drag')) { catchCursor(); return; }
 
   if (tool === 'drag') {
     const f = figureAt(p.x, p.y, 30);
     if (f) { dragged = f; f.state = 'dragged'; f.onGround = false; f.held = null; }
   } else if (tool === 'paint') {
     paintStroke(p.x, p.y, p.x + 0.1, p.y + 0.1);
-    const f = figureAt(p.x, p.y, 28); if (f) { f.color = paintColor; burstHearts(f.x, f.y - 50, 2); }
+    const f = figureAt(p.x, p.y, 28); if (f && !f.permaName) { f.color = paintColor; burstHearts(f.x, f.y - 50, 2); }
   } else if (tool === 'hammer') {
     if (!weaponStolen) hammerSlam(p.x, p.y);
   } else if (tool === 'saber') {
@@ -1067,10 +1424,13 @@ cv.addEventListener('pointerdown', e => {
   } else if (tool === 'name') {
     const f = figureAt(p.x, p.y, 30);
     if (f) openNameInput(f); else cancelNaming();
+  } else if (tool === 'pencil') {
+    pencilPts = [{ x: p.x, y: p.y }];
   }
 });
 
 window.addEventListener('pointerup', e => {
+  if (pencilPts) finishPencil();
   if (dragged) {
     const f = dragged; dragged = null;
     f.state = 'ragdoll';
@@ -1083,6 +1443,14 @@ window.addEventListener('pointerup', e => {
   mouse.down = false;
 });
 
+// The Dark Lord can "erase" your cursor — switch to another tab and back to get it back.
+window.addEventListener('blur', () => { leftTab = true; });
+window.addEventListener('focus', () => { if (cursorErased && leftTab) restoreCursor(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) leftTab = true;
+  else if (cursorErased && leftTab) restoreCursor();
+});
+
 function reclaim(f) {
   if (f.held === tool) weaponStolen = false;
   f.held = null; f.state = 'flee'; f.t = 0; f.dizzy = 0;
@@ -1093,7 +1461,7 @@ function reclaim(f) {
 function hammerSlam(x, y) {
   let hitAny = false;
   for (const f of figures) {
-    if (f.dead || f.state === 'ragdoll') continue;
+    if (f.dead || f.special || f.state === 'ragdoll') continue;
     if (dist(x, y, f.x, f.y - 16) < 46) { squashFigure(f); hitAny = true; }
   }
   // ground impact even on a miss
@@ -1126,6 +1494,7 @@ function positionNameInput(f) {
   nameInput.style.top  = clamp(f.y - figHeight(f) - 42, 8, H - 70) + 'px';
 }
 function openNameInput(f) {
+  if (f.permaName) { flashHint(f.name + ' cannot be renamed.'); return; }   // specials keep their titles
   if (namingFigure && namingFigure !== f) cancelNaming();
   if (!f.onGround) { f.y = groundY; f.vy = 0; f.vx = 0; f.onGround = true; }   // reground if clicked mid-leap
   namingFigure = f; f.naming = true; f.nameState = null;
@@ -1182,6 +1551,7 @@ document.querySelectorAll('.tool').forEach(btn => {
     palette.classList.toggle('show', tool === 'paint');
     recomputeWeaponStolen();          // re-arm the cursor unless a thief holds THIS tool
     cancelNaming();                   // close any open nickname box
+    pencilPts = null;                 // drop any half-drawn pencil stroke
     if (dragged) { dragged.state = 'getup'; dragged = null; }
     Sound.ensure(); Sound.resume();
     if (tool === 'saber') Sound.startSaber(); else Sound.stopSaber();
@@ -1195,7 +1565,7 @@ document.getElementById('muteBtn').addEventListener('click', () => {
   if (Sound.muted) Sound.stopSaber(); else if (tool === 'saber') { Sound.resume(); Sound.startSaber(); }
 });
 document.getElementById('resetBtn').addEventListener('click', () => {
-  cancelNaming();
+  cancelNaming(); restoreCursor(); pencilPts = null;
   pctx.clearRect(0, 0, W, H);
   foods.length = 0; particles.length = 0; pendingSpawns = 0; weaponStolen = false; dragged = null;
   spawnInitial();
