@@ -1,0 +1,1014 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Stick Figure Sandbox</title>
+<style>
+  :root { --ui: #1b2330; --ui2: #2a3850; --accent: #ffcf3f; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #87c6ff;
+    font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; -webkit-user-select: none; user-select: none; }
+  #stage { display: block; width: 100vw; height: 100vh; touch-action: none; }
+
+  /* Toolbar */
+  #toolbar { position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 6px; align-items: center; padding: 6px;
+    background: rgba(27,35,48,.82); border: 1px solid rgba(255,255,255,.12);
+    border-radius: 14px; box-shadow: 0 6px 22px rgba(0,0,0,.28); backdrop-filter: blur(6px);
+    z-index: 10; flex-wrap: wrap; max-width: 96vw; justify-content: center; }
+  .tool { appearance: none; border: 1px solid transparent; background: var(--ui2); color: #eaf0ff;
+    border-radius: 10px; padding: 7px 10px; font-size: 13px; font-weight: 600; cursor: pointer;
+    display: flex; align-items: center; gap: 6px; line-height: 1; transition: transform .06s ease, background .15s; }
+  .tool .ic { font-size: 18px; }
+  .tool:hover { background: #34466380; }
+  .tool:active { transform: translateY(1px) scale(.97); }
+  .tool.active { background: var(--accent); color: #20160a; border-color: #fff5cf; box-shadow: 0 0 0 2px rgba(255,207,63,.35); }
+  .sep { width: 1px; align-self: stretch; background: rgba(255,255,255,.14); margin: 2px 2px; }
+
+  /* Paint palette */
+  #palette { display: none; gap: 5px; align-items: center; padding-left: 2px; }
+  #palette.show { display: flex; }
+  .swatch { width: 22px; height: 22px; border-radius: 50%; cursor: pointer; border: 2px solid rgba(255,255,255,.5); }
+  .swatch.sel { border-color: #fff; transform: scale(1.12); box-shadow: 0 0 0 2px rgba(0,0,0,.25); }
+
+  .mini { background: var(--ui2); color: #eaf0ff; border: 1px solid transparent; border-radius: 10px;
+    padding: 7px 9px; font-size: 15px; cursor: pointer; }
+  .mini:hover { background: #34466380; }
+
+  #hint { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+    background: rgba(27,35,48,.74); color: #dfe8ff; padding: 6px 14px; border-radius: 20px;
+    font-size: 12.5px; z-index: 10; pointer-events: none; box-shadow: 0 4px 14px rgba(0,0,0,.22);
+    transition: opacity .5s; text-align: center; max-width: 92vw; }
+  b.k { color: var(--accent); }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+
+<div id="toolbar">
+  <button class="tool active" data-tool="drag"><span class="ic">🖐️</span>Drag</button>
+  <button class="tool" data-tool="paint"><span class="ic">🖌️</span>Paint</button>
+  <button class="tool" data-tool="hammer"><span class="ic">🔨</span>Hammer</button>
+  <button class="tool" data-tool="saber"><span class="ic">⚔️</span>Saber</button>
+  <button class="tool" data-tool="food"><span class="ic">🧺</span>Food</button>
+  <div id="palette"></div>
+  <div class="sep"></div>
+  <button class="mini" id="muteBtn" title="Toggle sound">🔊</button>
+  <button class="mini" id="resetBtn" title="Reset world">🔄</button>
+</div>
+
+<div id="hint">Pick a tool above. <b class="k">Tip:</b> while holding the hammer or saber, the stick figures may leap up and <b class="k">snatch it</b> to bash each other — lift your cursor toward the top of the screen to keep it safe. Click an armed figure to grab it back.</div>
+
+<script>
+"use strict";
+/* =========================================================================
+   Stick Figure Sandbox — a single-file canvas toy.
+   Everything (graphics + sound) is generated procedurally; no asset files.
+   ========================================================================= */
+
+// ---------- Canvas setup ----------
+const cv = document.getElementById('stage');
+const ctx = cv.getContext('2d');
+let W = 0, H = 0, DPR = 1, groundY = 0;
+
+// Persistent paint layer (drawn under the figures).
+let paint = document.createElement('canvas');
+let pctx = paint.getContext('2d');
+
+function resize() {
+  const prevDPR = DPR || 1;                  // the DPR the old paint canvas was created with
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  groundY = H - 46;
+  // Resize paint layer, preserving existing strokes.
+  const old = paint, ow = old.width, oh = old.height;
+  const np = document.createElement('canvas');
+  np.width = W * DPR; np.height = H * DPR;
+  const npc = np.getContext('2d');
+  npc.setTransform(DPR, 0, 0, DPR, 0, 0);
+  if (ow && oh) npc.drawImage(old, 0, 0, ow / prevDPR, oh / prevDPR);
+  paint = np; pctx = npc;
+  // Keep figures above ground after a resize.
+  for (const f of figures) if (f.onGround) f.y = Math.min(f.y, groundY);
+}
+window.addEventListener('resize', resize);
+
+// ---------- Small helpers ----------
+const rand = (a, b) => a + Math.random() * (b - a);
+const randInt = (a, b) => Math.floor(rand(a, b + 1));
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const choice = arr => arr[(Math.random() * arr.length) | 0];
+const dist = (ax, ay, bx, by) => Math.hypot(ax - bx, ay - by);
+// Distance from point P to segment AB.
+function segDist(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay;
+  const len2 = dx * dx + dy * dy || 1e-6;
+  let t = ((px - ax) * dx + (py - ay) * dy) / len2;
+  t = clamp(t, 0, 1);
+  return Math.hypot(px - (ax + dx * t), py - (ay + dy * t));
+}
+
+// ---------- Audio (procedural, lazily started) ----------
+const Sound = {
+  ctx: null, muted: false, saberOsc: null, saberGain: null,
+  ensure() {
+    if (this.ctx) return;
+    try { this.ctx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch (e) { this.ctx = null; }
+  },
+  resume() { if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume(); },
+  blip(freq, dur, type = 'square', vol = 0.18) {
+    if (!this.ctx || this.muted) return;
+    const t = this.ctx.currentTime;
+    const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+    o.type = type; o.frequency.setValueAtTime(freq, t);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0008, t + dur);
+    o.connect(g).connect(this.ctx.destination);
+    o.start(t); o.stop(t + dur);
+  },
+  bonk() {
+    if (!this.ctx || this.muted) return;
+    const t = this.ctx.currentTime;
+    const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+    o.type = 'square'; o.frequency.setValueAtTime(180, t);
+    o.frequency.exponentialRampToValueAtTime(48, t + 0.16);
+    g.gain.setValueAtTime(0.28, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+    o.connect(g).connect(this.ctx.destination); o.start(t); o.stop(t + 0.2);
+  },
+  slice() {
+    if (!this.ctx || this.muted) return;
+    const t = this.ctx.currentTime, dur = 0.22;
+    const buf = this.ctx.createBuffer(1, this.ctx.sampleRate * dur, this.ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
+    const src = this.ctx.createBufferSource(); src.buffer = buf;
+    const bp = this.ctx.createBiquadFilter(); bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(2400, t); bp.frequency.exponentialRampToValueAtTime(600, t + dur);
+    const g = this.ctx.createGain(); g.gain.setValueAtTime(0.3, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    src.connect(bp).connect(g).connect(this.ctx.destination); src.start(t);
+  },
+  munch() { this.blip(rand(160, 220), 0.08, 'triangle', 0.16); setTimeout(() => this.blip(rand(140, 200), 0.07, 'triangle', 0.14), 90); },
+  pop() { this.blip(rand(520, 720), 0.09, 'sine', 0.16); },
+  whoosh() { this.blip(rand(300, 420), 0.12, 'sawtooth', 0.08); },
+  startSaber() {
+    if (!this.ctx || this.muted || this.saberOsc) return;
+    const t = this.ctx.currentTime;
+    this.saberOsc = this.ctx.createOscillator(); this.saberGain = this.ctx.createGain();
+    this.saberOsc.type = 'sawtooth'; this.saberOsc.frequency.setValueAtTime(70, t);
+    this.saberGain.gain.setValueAtTime(0.05, t);
+    const lfo = this.ctx.createOscillator(), lg = this.ctx.createGain();
+    lfo.frequency.value = 6; lg.gain.value = 6; lfo.connect(lg).connect(this.saberOsc.frequency);
+    this.saberOsc.connect(this.saberGain).connect(this.ctx.destination);
+    this.saberOsc.start(); lfo.start(); this.saberLfo = lfo;
+  },
+  stopSaber() {
+    if (this.saberOsc) { try { this.saberOsc.stop(); this.saberLfo.stop(); } catch (e) {} this.saberOsc = null; this.saberGain = null; }
+  }
+};
+
+// ---------- Global state ----------
+const FIG_COLORS = ['#2b2b35', '#5b3a29', '#1f4f6b', '#6b1f4f', '#2f5f2f', '#5f4a1f'];
+const PAINT_COLORS = ['#ff4d5e', '#ff9f1c', '#ffd23f', '#3ddc84', '#2aa8ff', '#9b5cff', '#ff6ec7', '#ffffff'];
+const TARGET_POP = 6;
+
+let tool = 'drag';
+let paintColor = PAINT_COLORS[0];
+
+const figures = [];
+const particles = [];
+const foods = [];
+let pendingSpawns = 0;        // figures queued to walk back in
+let spawnTimer = 0;
+
+let shake = 0;                // screen-shake magnitude
+
+// Cursor / pointer
+const mouse = { x: W / 2, y: H / 2, px: W / 2, py: H / 2, vx: 0, vy: 0,
+                dragVx: 0, dragVy: 0, lastMoveT: 0, down: false, inside: false };
+let dragged = null;           // figure currently held by the cursor
+let weaponStolen = false;     // is the player's current weapon snatched?
+let saberPrev = null;         // previous blade segment for swipe slicing
+
+// ---------- Figure factory ----------
+let FIG_ID = 0;
+function makeFigure(x, fromEdge) {
+  const f = {
+    id: ++FIG_ID,
+    x: x, y: groundY,
+    vx: 0, vy: 0,
+    onGround: true,
+    facing: Math.random() < 0.5 ? 1 : -1,
+    color: choice(FIG_COLORS),
+    state: 'walk',
+    target: null,                 // wander target x
+    t: 0,                          // generic state timer
+    walk: Math.random() * 10,      // walk-cycle phase
+    sx: 1, sy: 1,                  // squash/stretch scale
+    rot: 0, rotV: 0,               // tumble rotation
+    held: null,                    // weapon a thief is carrying: 'hammer' | 'saber'
+    swing: 0,                      // weapon swing animation 0..1
+    swingDir: 1,
+    victim: null,                  // current brawl target id
+    armTimer: 0,                   // how long armed before getting bored
+    cool: 0,                       // per-action cooldown (snatch attempts, swings)
+    dizzy: 0,                      // dizzy/star timer
+    dead: false,                   // marked for removal; swept after the update loop
+    spawnIn: fromEdge ? 1 : 0,     // little fade-in
+  };
+  pickWander(f);
+  return f;
+}
+function pickWander(f) {
+  f.target = clamp(f.x + rand(-260, 260), 30, W - 30);
+  f.state = 'walk';
+  f.facing = f.target < f.x ? -1 : 1;
+}
+function spawnInitial() {
+  figures.length = 0;
+  for (let i = 0; i < TARGET_POP; i++) figures.push(makeFigure(rand(60, W - 60), false));
+}
+function queueRespawn(n = 1) { pendingSpawns += n; }
+
+// ---------- Particles ----------
+function addParticle(p) { particles.push(Object.assign({ t: 0, life: 1, vy: 0, vx: 0, rot: 0, rotV: 0, g: 900 }, p)); }
+function burstStars(x, y, n = 8) {
+  for (let i = 0; i < n; i++) addParticle({
+    kind: 'star', x, y, vx: rand(-220, 220), vy: rand(-360, -120),
+    life: rand(0.5, 0.9), size: rand(7, 13), color: choice(['#ffd23f', '#fff', '#ffb03f']),
+    rot: rand(0, 6.28), rotV: rand(-12, 12)
+  });
+}
+function burstHearts(x, y, n = 5) {
+  for (let i = 0; i < n; i++) addParticle({
+    kind: 'heart', x: x + rand(-12, 12), y, vx: rand(-40, 40), vy: rand(-110, -60),
+    life: rand(0.8, 1.4), size: rand(10, 16), color: '#ff5e7a', g: 120
+  });
+}
+function burstDebris(f) {
+  // Stick-figure "pieces" flung out when sliced.
+  const cx = f.x, cy = f.y - 36;
+  const parts = [
+    { type: 'head' }, { type: 'torso' }, { type: 'arm' }, { type: 'arm' }, { type: 'leg' }, { type: 'leg' }
+  ];
+  for (const pt of parts) addParticle({
+    kind: 'piece', piece: pt.type, x: cx + rand(-6, 6), y: cy + rand(-20, 20),
+    vx: rand(-260, 260), vy: rand(-420, -120), life: rand(1.1, 1.7),
+    color: f.color, size: 1, rot: rand(0, 6.28), rotV: rand(-14, 14), g: 1100, floor: groundY
+  });
+  for (let i = 0; i < 10; i++) addParticle({
+    kind: 'spark', x: cx, y: cy, vx: rand(-300, 300), vy: rand(-300, 80),
+    life: rand(0.3, 0.6), size: rand(2, 4), color: choice(['#9be7ff', '#fff', '#7fe0ff']), g: 200
+  });
+}
+
+// ---------- Food ----------
+const FOOD_EMOJI = ['🍎', '🍌', '🍕', '🍩', '🍔', '🍇', '🍪', '🥕', '🍗', '🧀'];
+function dropFood(x, y) {
+  foods.push({ x, y, vy: 0, emoji: choice(FOOD_EMOJI), onGround: false, eaten: false, wobble: rand(0, 6.28) });
+  Sound.pop();
+}
+
+// ====================================================================
+//  UPDATE
+// ====================================================================
+function update(dt) {
+  // cursor velocity
+  mouse.vx = (mouse.x - mouse.px) / dt;
+  mouse.vy = (mouse.y - mouse.py) / dt;
+  const cursorSpeed = Math.hypot(mouse.vx, mouse.vy);
+
+  // The blade segment for this frame (used for swipe-slicing).
+  let blade = null;
+  if (tool === 'saber' && !weaponStolen) blade = saberSegment(mouse.x, mouse.y);
+
+  // ---- figures ----
+  for (const f of figures) {
+    if (f.dead) continue;
+    f.t += dt;
+    if (f.spawnIn > 0) f.spawnIn = Math.max(0, f.spawnIn - dt * 2);
+    if (f.cool > 0) f.cool -= dt;
+    if (f.dizzy > 0) f.dizzy -= dt;
+
+    // ease squash/stretch back to normal
+    f.sx += (1 - f.sx) * Math.min(1, dt * 10);
+    f.sy += (1 - f.sy) * Math.min(1, dt * 10);
+
+    switch (f.state) {
+      case 'walk':       updateWalk(f, dt); break;
+      case 'idle':       updateIdle(f, dt); break;
+      case 'flee':       updateFlee(f, dt); break;
+      case 'leap':       updateLeap(f, dt); break;
+      case 'armed':      updateArmed(f, dt); break;
+      case 'squashed':   updateSquashed(f, dt); break;
+      case 'getup':      updateGetup(f, dt); break;
+      case 'ragdoll':    updateRagdoll(f, dt); break;
+      case 'eating':     updateEating(f, dt); break;
+      case 'dragged':    /* handled by pointer */ break;
+    }
+
+    // Reactions to a dangerous cursor (flee from held weapon) — only for calm walkers.
+    if ((f.state === 'walk' || f.state === 'idle') && !weaponStolen &&
+        (tool === 'hammer' || tool === 'saber') && mouse.inside) {
+      const d = dist(f.x, f.y - 40, mouse.x, mouse.y);
+      if (d < 95) startFlee(f);
+    }
+
+    // Player saber swipe-slicing.
+    if (blade && f.state !== 'ragdoll' && cursorSpeed > 480 && f.spawnIn === 0) {
+      if (segDist(f.x, f.y - 36, blade.ax, blade.ay, blade.bx, blade.by) < 22) sliceFigure(f);
+    }
+
+    // keep on screen
+    f.x = clamp(f.x, 14, W - 14);
+  }
+
+  // Sweep out sliced figures now that iteration is done (no mutation mid-loop).
+  for (let i = figures.length - 1; i >= 0; i--) if (figures[i].dead) figures.splice(i, 1);
+
+  // Snatch logic: a calm figure may leap for the player's weapon.
+  trySnatch(dt);
+
+  // ---- food ----
+  updateFoods(dt);
+
+  // ---- particles ----
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.t += dt;
+    p.vy += (p.g || 0) * dt;
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.rot += (p.rotV || 0) * dt;
+    if (p.kind === 'piece' && p.y > p.floor) { p.y = p.floor; p.vy *= -0.4; p.vx *= 0.6; p.rotV *= 0.5; }
+    if (p.t > p.life) particles.splice(i, 1);
+  }
+
+  // ---- respawns to maintain population ----
+  if (figures.length + 0 < TARGET_POP && pendingSpawns <= 0) queueRespawn(TARGET_POP - figures.length);
+  if (pendingSpawns > 0) {
+    spawnTimer -= dt;
+    if (spawnTimer <= 0) {
+      const side = Math.random() < 0.5 ? -1 : 1;
+      const f = makeFigure(side < 0 ? 20 : W - 20, true);
+      figures.push(f); pendingSpawns--; spawnTimer = rand(0.5, 1.2);
+    }
+  }
+
+  // ---- decay shake, remember cursor pos ----
+  shake *= Math.pow(0.0008, dt);
+  if (shake < 0.3) shake = 0;
+  mouse.px = mouse.x; mouse.py = mouse.y;
+  saberPrev = blade;
+}
+
+// ----- per-state behavior -----
+function updateWalk(f, dt) {
+  const dir = f.target > f.x ? 1 : -1;
+  f.facing = dir;
+  f.x += dir * 55 * dt;
+  f.walk += dt * 9;
+  if (Math.abs(f.x - f.target) < 6) {
+    if (Math.random() < 0.5) { f.state = 'idle'; f.t = 0; }
+    else pickWander(f);
+  }
+}
+function updateIdle(f, dt) {
+  if (f.t > rand(0.6, 1.8)) pickWander(f);
+}
+function startFlee(f) { f.state = 'flee'; f.t = 0; f.dizzy = 0; }
+function updateFlee(f, dt) {
+  const dir = mouse.x > f.x ? -1 : 1;     // run away from cursor
+  f.facing = dir;
+  f.x += dir * 165 * dt;
+  f.walk += dt * 20;
+  const d = dist(f.x, f.y - 40, mouse.x, mouse.y);
+  if (f.t > 1.4 || d > 220) pickWander(f);
+}
+
+// Leaping up to snatch the player's weapon.
+function startLeap(f) {
+  f.state = 'leap'; f.onGround = false;
+  const dir = mouse.x > f.x ? 1 : -1; f.facing = dir;
+  f.vx = dir * Math.min(260, Math.abs(mouse.x - f.x) * 2.4 + 60);
+  f.vy = -560; f.t = 0;
+}
+function updateLeap(f, dt) {
+  f.vy += 1500 * dt;
+  f.x += f.vx * dt; f.y += f.vy * dt;
+  f.walk += dt * 4;
+  // hand reach point (arms up)
+  const hx = f.x + f.facing * 8, hy = f.y - figHeight(f) - 16;
+  if (!weaponStolen && (tool === 'hammer' || tool === 'saber') &&
+      dist(hx, hy, mouse.x, mouse.y) < 30) {
+    becomeArmed(f, tool);
+    return;
+  }
+  if (f.y >= groundY) { f.y = groundY; f.vy = 0; f.onGround = true; pickWander(f); }
+}
+
+function becomeArmed(f, weapon) {
+  f.held = weapon; f.state = 'armed'; f.onGround = true; f.y = groundY;
+  f.vx = 0; f.vy = 0; f.armTimer = rand(7, 11); f.victim = null; f.cool = 0;
+  weaponStolen = true;
+  Sound.whoosh();
+  burstStars(mouse.x, mouse.y, 5);
+  flashHint('A figure snatched your ' + (weapon === 'hammer' ? 'hammer' : 'saber') +
+            '! Click it to grab it back.');
+}
+function updateArmed(f, dt) {
+  f.armTimer -= dt;
+  f.walk += dt * 11;
+  if (f.armTimer <= 0) { dropWeapon(f); return; }
+
+  // find nearest non-armed victim
+  let v = null, best = 1e9;
+  for (const o of figures) {
+    // never target a figure that's held by the cursor, already armed, dead, or ragdolling
+    if (o === f || o.held || o.dead || o.state === 'ragdoll' || o.state === 'dragged') continue;
+    const d = Math.abs(o.x - f.x);
+    if (d < best) { best = d; v = o; }
+  }
+  if (!v) { f.vx = 0; return; }
+  f.victim = v.id;
+  const dir = v.x > f.x ? 1 : -1; f.facing = dir;
+  if (best > 38) {
+    f.x += dir * 120 * dt;              // chase
+    f.swing *= Math.pow(0.01, dt);
+  } else if (f.cool <= 0) {
+    // swing!
+    f.swing = 1; f.cool = rand(0.45, 0.8);
+    if (f.held === 'hammer') { squashFigure(v); }
+    else { sliceFigure(v); }
+  } else {
+    f.swing *= Math.pow(0.01, dt);
+  }
+}
+
+function dropWeapon(f) {
+  if (f.held === tool) weaponStolen = false;   // player gets it back when the thief tires
+  f.held = null; f.state = 'getup'; f.t = 0; f.dizzy = 1.0;
+  Sound.pop();
+}
+
+// `weaponStolen` means "the currently-selected tool is in a thief's hands."
+// Recompute it whenever the cursor changes tools so the flag and the armed
+// thieves stay consistent (a thief keeps brawling with whatever it grabbed).
+function recomputeWeaponStolen() {
+  weaponStolen = figures.some(f => f.state === 'armed' && f.held === tool);
+}
+
+function squashFigure(f) {
+  if (f.dead || f.state === 'ragdoll') return;
+  if (f.held === tool) weaponStolen = false;   // squashing a thief returns the player's tool
+  f.held = null;
+  f.sx = 1.8; f.sy = 0.22; f.state = 'squashed'; f.t = 0; f.vx = 0; f.vy = 0;
+  f.onGround = true; f.y = groundY;
+  burstStars(f.x, f.y - 10, 10);
+  shake = Math.max(shake, 14);
+  Sound.bonk();
+}
+function updateSquashed(f, dt) {
+  if (f.t > 0.7) { f.state = 'getup'; f.t = 0; f.dizzy = 1.2; }
+}
+function updateGetup(f, dt) {
+  f.walk = 0;
+  if (f.t > 0.6) { if (f.dizzy > 0) startFlee(f); else pickWander(f); }
+}
+
+function sliceFigure(f) {
+  if (f.dead || f.state === 'ragdoll') return;
+  // If this figure was carrying the player's current weapon, the player reclaims it.
+  if (f.held === tool) weaponStolen = false;
+  f.dead = true;                 // swept after the update loop (avoids mid-iteration splice)
+  burstDebris(f);
+  shake = Math.max(shake, 9);
+  Sound.slice();
+  if (dragged === f) dragged = null;
+  queueRespawn(1);
+}
+
+// thrown-by-cursor ragdoll
+function updateRagdoll(f, dt) {
+  f.vy += 1500 * dt;
+  f.x += f.vx * dt; f.y += f.vy * dt;
+  f.rot += f.rotV * dt;
+  if (f.x < 14) { f.x = 14; f.vx = Math.abs(f.vx) * 0.5; }
+  if (f.x > W - 14) { f.x = W - 14; f.vx = -Math.abs(f.vx) * 0.5; }
+  if (f.y >= groundY) {
+    f.y = groundY;
+    if (Math.abs(f.vy) > 120) { f.vy *= -0.45; f.vx *= 0.6; f.rotV *= 0.5; burstStars(f.x, f.y - 6, 3); }
+    else { f.vy = 0; f.vx *= 0.7; }
+    if (Math.abs(f.vy) < 60 && Math.abs(f.vx) < 30) {
+      f.onGround = true; f.rot = 0; f.rotV = 0; f.state = 'getup'; f.t = 0; f.dizzy = 0.8;
+    }
+  }
+}
+
+function updateEating(f, dt) {
+  f.walk += dt * 3;
+  if (f.t > 1.0) { if (Math.random() < 0.4) burstHearts(f.x, f.y - 52, 3); pickWander(f); }
+}
+
+// ----- snatch driver -----
+function trySnatch(dt) {
+  if (weaponStolen || dragged) return;
+  if (!(tool === 'hammer' || tool === 'saber') || !mouse.inside) return;
+  for (const f of figures) {
+    if (f.state !== 'walk' && f.state !== 'idle' && f.state !== 'flee') continue;
+    if (f.cool > 0 || f.spawnIn > 0) continue;
+    const horiz = Math.abs(mouse.x - f.x);
+    // Will the figure's leap apex be able to reach the cursor height?
+    const apexHandY = groundY - figHeight(f) - 16 - 104;    // ~ max reach with a leap
+    if (horiz < 110 && mouse.y > apexHandY - 6 && mouse.y < groundY + 10) {
+      // close enough horizontally AND cursor is within leaping reach -> sometimes go for it
+      if (Math.random() < 0.9 * dt * 1.6) { startLeap(f); f.cool = 1.4; }
+    }
+  }
+}
+
+// ----- food driver -----
+function updateFoods(dt) {
+  for (let i = foods.length - 1; i >= 0; i--) {
+    const fd = foods[i];
+    fd.wobble += dt * 6;
+    if (!fd.onGround) {
+      fd.vy += 1400 * dt; fd.y += fd.vy * dt;
+      if (fd.y >= groundY - 6) { fd.y = groundY - 6; fd.onGround = true; fd.vy = 0; }
+    }
+    if (fd.eaten) { foods.splice(i, 1); continue; }
+  }
+  // figures seek nearest food
+  for (const f of figures) {
+    if (f.dead) continue;
+    if (f.state !== 'walk' && f.state !== 'idle') continue;
+    let target = null, best = 240;
+    for (const fd of foods) {
+      if (fd.eaten || !fd.onGround) continue;   // only chase food that has landed
+      const d = Math.abs(fd.x - f.x);
+      if (d < best) { best = d; target = fd; }
+    }
+    if (target) {
+      const dir = target.x > f.x ? 1 : -1; f.facing = dir;
+      if (Math.abs(target.x - f.x) > 14) { f.x += dir * 70 * dt; f.walk += dt * 11; f.state = 'walk'; }
+      else { target.eaten = true; f.state = 'eating'; f.t = 0; burstHearts(f.x, f.y - 52, 4); Sound.munch(); }
+    }
+  }
+}
+
+// ====================================================================
+//  RENDER
+// ====================================================================
+function figHeight() { return 64; }   // nominal head-to-foot height
+
+function render() {
+  ctx.clearRect(0, 0, W, H);
+
+  // sky
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, '#8fd0ff'); sky.addColorStop(0.7, '#bfe9ff'); sky.addColorStop(1, '#e8f7ff');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+  drawClouds();
+
+  // screen shake
+  ctx.save();
+  if (shake > 0) ctx.translate(rand(-shake, shake), rand(-shake, shake));
+
+  // ground
+  ctx.fillStyle = '#8fcf6a'; ctx.fillRect(0, groundY, W, H - groundY + 40);
+  ctx.fillStyle = '#7cbf57'; ctx.fillRect(0, groundY, W, 5);
+
+  // persistent paint, drawn over the ground but under the figures
+  ctx.drawImage(paint, 0, 0, W, H);
+
+  // food
+  for (const fd of foods) {
+    ctx.save();
+    ctx.translate(fd.x, fd.y + Math.sin(fd.wobble) * (fd.onGround ? 1.5 : 0));
+    ctx.font = '24px serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(fd.emoji, 0, 0);
+    ctx.restore();
+  }
+
+  // figures (sorted by x just for a touch of depth consistency)
+  for (const f of figures) drawFigure(f);
+
+  // particles
+  for (const p of particles) drawParticle(p);
+
+  ctx.restore();   // end shake
+
+  // the tool the cursor is "holding"
+  drawCursorTool();
+}
+
+let cloudT = 0;
+function drawClouds() {
+  ctx.save(); ctx.globalAlpha = 0.85; ctx.fillStyle = '#ffffff';
+  const cloud = (cx, cy, s) => {
+    ctx.beginPath();
+    ctx.arc(cx, cy, 22 * s, 0, 7); ctx.arc(cx + 24 * s, cy + 6 * s, 18 * s, 0, 7);
+    ctx.arc(cx - 24 * s, cy + 6 * s, 16 * s, 0, 7); ctx.arc(cx, cy + 10 * s, 20 * s, 0, 7);
+    ctx.fill();
+  };
+  const span = W + 200;
+  for (let i = 0; i < 4; i++) {
+    const x = ((cloudT * (10 + i * 4) + i * 320) % span) - 100;
+    cloud(x, 70 + i * 36, 0.8 + (i % 2) * 0.5);
+  }
+  ctx.restore();
+}
+
+// --- the heart of the look: a procedural stick figure ---
+function drawFigure(f) {
+  const h = figHeight(f);
+  const headR = 9;
+  ctx.save();
+  ctx.globalAlpha = f.spawnIn > 0 ? 1 - f.spawnIn : 1;
+
+  // pivot at the feet; squash/stretch + facing + tumble rotation
+  ctx.translate(f.x, f.y);
+  if (f.state === 'ragdoll' && f.rot) { ctx.translate(0, -h * 0.5); ctx.rotate(f.rot); ctx.translate(0, h * 0.5); }
+  ctx.scale(f.facing * f.sx, f.sy);
+
+  ctx.strokeStyle = f.color; ctx.fillStyle = f.color;
+  ctx.lineWidth = 4.2; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+
+  const hipY = -26, shoulderY = -h + headR * 2 + 4, headCY = -h + headR;
+
+  // ---- legs ----
+  let lA, lB;
+  const phase = f.walk;
+  if (f.state === 'squashed') { lA = -1.0; lB = 1.0; }
+  else if (f.state === 'leap') { lA = -0.6; lB = 0.5; }
+  else if (f.state === 'eating') { lA = -0.15; lB = 0.15; }
+  else { const sw = Math.sin(phase) * 0.5; lA = sw; lB = -sw; }
+  leg(hipY, lA); leg(hipY, lB);
+
+  // ---- torso ----
+  ctx.beginPath(); ctx.moveTo(0, hipY); ctx.lineTo(0, shoulderY); ctx.stroke();
+
+  // ---- arms ----
+  drawArms(f, shoulderY);
+
+  // ---- head ----
+  ctx.beginPath(); ctx.arc(0, headCY, headR, 0, 7); ctx.fillStyle = f.color; ctx.fill();
+  // simple face
+  ctx.fillStyle = '#fff';
+  const eyeY = headCY - 1;
+  ctx.beginPath(); ctx.arc(3, eyeY, 1.7, 0, 7); ctx.arc(-3, eyeY, 1.7, 0, 7); ctx.fill();
+  ctx.fillStyle = '#111';
+  const look = f.state === 'flee' ? 1.2 : 0.6;
+  ctx.beginPath(); ctx.arc(3 + look, eyeY, 0.9, 0, 7); ctx.arc(-3 + look, eyeY, 0.9, 0, 7); ctx.fill();
+
+  ctx.restore();
+
+  // dizzy stars / panic mark (drawn unscaled, above head)
+  if (f.dizzy > 0 && (f.state === 'getup' || f.state === 'squashed')) {
+    drawDizzy(f.x, f.y - h - 6, f.t);
+  }
+  if (f.state === 'flee') {
+    ctx.save(); ctx.font = '14px serif'; ctx.textAlign = 'center';
+    ctx.fillText('❗', f.x + f.facing * 12, f.y - h - 6); ctx.restore();
+  }
+  if (f.state === 'eating') {
+    ctx.save(); ctx.font = '14px serif'; ctx.textAlign = 'center';
+    ctx.fillText('😋', f.x, f.y - h - 8); ctx.restore();
+  }
+
+  function leg(topY, swing) {
+    const kneeX = swing * 7, footX = swing * 13;
+    ctx.beginPath(); ctx.moveTo(0, topY);
+    ctx.lineTo(kneeX, topY + 13); ctx.lineTo(footX, 0); ctx.stroke();
+  }
+}
+
+function drawArms(f, shoulderY) {
+  const swingArm = (baseAng, len1, len2, bend) => {
+    const x1 = Math.sin(baseAng) * len1, y1 = shoulderY + Math.cos(baseAng) * len1;
+    const x2 = x1 + Math.sin(baseAng + bend) * len2, y2 = y1 + Math.cos(baseAng + bend) * len2;
+    ctx.beginPath(); ctx.moveTo(0, shoulderY); ctx.lineTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    return { x: x2, y: y2 };
+  };
+
+  if (f.state === 'dragged') {
+    const fl = Math.sin(f.walk * 6) * 0.6;
+    swingArm(2.4 + fl, 11, 12, 0.5); swingArm(-2.4 - fl, 11, 12, -0.5);
+  } else if (f.state === 'leap') {
+    swingArm(0.5, 12, 12, 0.2); swingArm(-0.5, 12, 12, -0.2);   // reaching up
+  } else if (f.state === 'armed') {
+    swingArm(-2.5, 11, 12, -0.4);                               // off-hand
+    const sw = f.swing;
+    const ang = lerp(2.2, 0.4, sw);                             // overhead -> down chop
+    const hand = swingArm(ang, 12, 13, 0.3);
+    drawHeldWeapon(hand.x, hand.y, ang, f.held, f.facing);
+  } else if (f.state === 'squashed') {
+    swingArm(1.6, 13, 11, 0.2); swingArm(-1.6, 13, 11, -0.2);
+  } else if (f.state === 'eating') {
+    const m = Math.sin(f.walk * 4) * 0.25;
+    swingArm(0.6 + m, 11, 11, 0.4); swingArm(-0.6 - m, 11, 11, -0.4);
+  } else {
+    const sw = Math.sin(f.walk + Math.PI) * 0.5;
+    swingArm(sw + 2.7, 12, 11, 0.25); swingArm(-sw - 2.7, 12, 11, -0.25);
+  }
+}
+
+function drawHeldWeapon(x, y, ang, weapon, facing) {
+  ctx.save();
+  ctx.translate(x, y); ctx.rotate(-ang * facing);
+  if (weapon === 'hammer') {
+    ctx.strokeStyle = '#7a4a20'; ctx.lineWidth = 3.5;
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, -16); ctx.stroke();
+    ctx.fillStyle = '#9aa3ad'; ctx.fillRect(-7, -22, 14, 9);
+    ctx.fillStyle = '#7d8690'; ctx.fillRect(-7, -22, 4, 9);
+  } else {
+    drawBlade(0, 0, 0, -34, '#54ff8a');
+    ctx.strokeStyle = '#888'; ctx.lineWidth = 3.5;
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, 7); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawBlade(ax, ay, bx, by, color) {
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.shadowColor = color; ctx.shadowBlur = 16;
+  ctx.strokeStyle = color; ctx.lineWidth = 7;
+  ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+  ctx.strokeStyle = '#eafff0'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+  ctx.restore();
+}
+
+function drawDizzy(x, y, t) {
+  ctx.save(); ctx.translate(x, y);
+  for (let i = 0; i < 3; i++) {
+    const a = t * 6 + i * 2.1;
+    ctx.fillStyle = '#ffd23f'; ctx.font = '11px serif'; ctx.textAlign = 'center';
+    ctx.fillText('✦', Math.cos(a) * 11, Math.sin(a) * 5);
+  }
+  ctx.restore();
+}
+
+function drawParticle(p) {
+  const a = clamp(1 - p.t / p.life, 0, 1);
+  ctx.save(); ctx.globalAlpha = a; ctx.translate(p.x, p.y); ctx.rotate(p.rot || 0);
+  if (p.kind === 'star') {
+    ctx.fillStyle = p.color; ctx.font = p.size + 'px serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('✦', 0, 0);
+  } else if (p.kind === 'heart') {
+    ctx.fillStyle = p.color; ctx.font = p.size + 'px serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('❤', 0, 0);
+  } else if (p.kind === 'spark') {
+    ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(0, 0, p.size, 0, 7); ctx.fill();
+  } else if (p.kind === 'piece') {
+    ctx.strokeStyle = p.color; ctx.fillStyle = p.color; ctx.lineWidth = 4.2; ctx.lineCap = 'round';
+    if (p.piece === 'head') { ctx.beginPath(); ctx.arc(0, 0, 9, 0, 7); ctx.fill(); }
+    else if (p.piece === 'torso') { ctx.beginPath(); ctx.moveTo(0, -12); ctx.lineTo(0, 12); ctx.stroke(); }
+    else if (p.piece === 'arm') { ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(14, 6); ctx.stroke(); }
+    else { ctx.beginPath(); ctx.moveTo(0, -10); ctx.lineTo(4, 0); ctx.lineTo(0, 12); ctx.stroke(); }
+  }
+  ctx.restore();
+}
+
+// The saber blade as a world segment from the cursor.
+function saberSegment(mx, my) {
+  const len = 40, ang = -0.5;   // points up-right from the cursor
+  return { ax: mx, ay: my, bx: mx + Math.sin(ang) * len, by: my - Math.cos(ang) * len };
+}
+
+function drawCursorTool() {
+  if (!mouse.inside) return;
+  const x = mouse.x, y = mouse.y;
+  ctx.save();
+  if (tool === 'paint') {
+    ctx.translate(x, y); ctx.rotate(0.5);
+    ctx.strokeStyle = '#8a5a2b'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, 22); ctx.stroke();
+    ctx.fillStyle = paintColor; ctx.beginPath(); ctx.moveTo(-5, -2); ctx.lineTo(5, -2); ctx.lineTo(0, -14); ctx.fill();
+  } else if (tool === 'hammer') {
+    if (weaponStolen) { drawStolenGhost(x, y, '🔨'); }
+    else {
+      ctx.translate(x + 14, y + 6);
+      ctx.strokeStyle = '#7a4a20'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, 22); ctx.stroke();
+      ctx.fillStyle = '#9aa3ad'; ctx.fillRect(-9, -4, 18, 11);
+      ctx.fillStyle = '#7d8690'; ctx.fillRect(-9, -4, 5, 11);
+      drawSafeBadge(x, y, -22);
+    }
+  } else if (tool === 'saber') {
+    if (weaponStolen) { drawStolenGhost(x, y, '⚔️'); }
+    else {
+      const seg = saberSegment(x, y);
+      ctx.strokeStyle = '#777'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - Math.sin(-0.5) * 8, y + Math.cos(-0.5) * 8); ctx.stroke();
+      drawBlade(seg.ax, seg.ay, seg.bx, seg.by, '#54ff8a');
+      drawSafeBadge(x, y, -52);
+    }
+  } else if (tool === 'food') {
+    ctx.font = '26px serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('🧺', x + 14, y + 10);
+  }
+  ctx.restore();
+}
+
+function drawSafeBadge(x, y, off) {
+  // when cursor is high enough that figures can't reach, show a shield
+  const apexHandY = groundY - figHeight() - 16 - 104;
+  if (y < apexHandY - 6) {
+    ctx.save(); ctx.font = '15px serif'; ctx.textAlign = 'center';
+    ctx.globalAlpha = 0.95; ctx.fillText('🛡️', x, y + off); ctx.restore();
+  }
+}
+function drawStolenGhost(x, y, emoji) {
+  ctx.save(); ctx.globalAlpha = 0.45; ctx.font = '20px serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(emoji, x + 14, y + 8);
+  ctx.globalAlpha = 0.9; ctx.font = '11px sans-serif'; ctx.fillStyle = '#c0392b';
+  ctx.fillText('grab it back!', x + 14, y + 26);
+  ctx.restore();
+}
+
+// ====================================================================
+//  INPUT
+// ====================================================================
+function pointerPos(e) {
+  const r = cv.getBoundingClientRect();
+  return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+function figureAt(x, y, r = 26) {
+  let best = null, bd = r;
+  for (const f of figures) {
+    if (f.dead || f.state === 'ragdoll') continue;
+    const d = dist(x, y - figHeight(f) * 0.5, f.x, f.y - figHeight(f) * 0.5);
+    if (d < bd) { bd = d; best = f; }
+  }
+  return best;
+}
+
+cv.addEventListener('pointermove', e => {
+  const p = pointerPos(e);
+  // Smoothed pointer velocity from the move events themselves, so a flick's
+  // momentum survives a final static frame when computing the throw.
+  const now = performance.now();
+  const dtMove = Math.max(1, now - (mouse.lastMoveT || now)) / 1000;
+  const a = 0.4;
+  mouse.dragVx = (mouse.dragVx || 0) * (1 - a) + ((p.x - mouse.x) / dtMove) * a;
+  mouse.dragVy = (mouse.dragVy || 0) * (1 - a) + ((p.y - mouse.y) / dtMove) * a;
+  mouse.lastMoveT = now;
+  if (tool === 'paint' && mouse.down) paintStroke(mouse.x, mouse.y, p.x, p.y);
+  mouse.x = p.x; mouse.y = p.y; mouse.inside = true;
+});
+cv.addEventListener('pointerleave', () => { mouse.inside = false; });
+
+cv.addEventListener('pointerdown', e => {
+  cv.setPointerCapture(e.pointerId);
+  Sound.ensure(); Sound.resume();
+  const p = pointerPos(e); mouse.x = p.x; mouse.y = p.y; mouse.px = p.x; mouse.py = p.y;
+  mouse.down = true; mouse.inside = true;
+  mouse.dragVx = 0; mouse.dragVy = 0; mouse.lastMoveT = performance.now();   // fresh velocity for this gesture
+
+  // Reclaiming a stolen weapon: clicking an armed figure with any tool.
+  const armedHit = figureAt(p.x, p.y, 30);
+  if (armedHit && armedHit.held) { reclaim(armedHit); return; }
+
+  if (tool === 'drag') {
+    const f = figureAt(p.x, p.y, 30);
+    if (f) { dragged = f; f.state = 'dragged'; f.onGround = false; f.held = null; }
+  } else if (tool === 'paint') {
+    paintStroke(p.x, p.y, p.x + 0.1, p.y + 0.1);
+    const f = figureAt(p.x, p.y, 28); if (f) { f.color = paintColor; burstHearts(f.x, f.y - 50, 2); }
+  } else if (tool === 'hammer') {
+    if (!weaponStolen) hammerSlam(p.x, p.y);
+  } else if (tool === 'saber') {
+    if (!weaponStolen) { const f = figureAt(p.x, p.y, 30); if (f) sliceFigure(f); }
+  } else if (tool === 'food') {
+    dropFood(p.x, p.y);
+  }
+});
+
+window.addEventListener('pointerup', e => {
+  if (dragged) {
+    const f = dragged; dragged = null;
+    f.state = 'ragdoll';
+    f.vx = clamp(mouse.dragVx || 0, -1400, 1400);
+    f.vy = clamp(mouse.dragVy || 0, -1400, 600);
+    f.rotV = clamp((mouse.dragVx || 0) / 90, -12, 12);
+    f.onGround = false;
+    Sound.whoosh();
+  }
+  mouse.down = false;
+});
+
+function reclaim(f) {
+  if (f.held === tool) weaponStolen = false;
+  f.held = null; f.state = 'flee'; f.t = 0; f.dizzy = 0;
+  burstStars(f.x, f.y - 40, 5); Sound.pop();
+  flashHint('Got it back!');
+}
+
+function hammerSlam(x, y) {
+  let hitAny = false;
+  for (const f of figures) {
+    if (f.dead || f.state === 'ragdoll') continue;
+    if (dist(x, y, f.x, f.y - 16) < 46) { squashFigure(f); hitAny = true; }
+  }
+  // ground impact even on a miss
+  shake = Math.max(shake, hitAny ? 14 : 8);
+  burstStars(x, Math.min(y, groundY), hitAny ? 8 : 4);
+  if (!hitAny) Sound.bonk();
+}
+
+function paintStroke(x0, y0, x1, y1) {
+  pctx.strokeStyle = paintColor; pctx.lineWidth = 9; pctx.lineCap = 'round'; pctx.lineJoin = 'round';
+  pctx.beginPath(); pctx.moveTo(x0, y0); pctx.lineTo(x1, y1); pctx.stroke();
+}
+
+// Smoothly carry the dragged figure under the cursor each frame.
+function tickDrag(dt) {
+  if (!dragged) return;
+  const f = dragged;
+  const targetX = mouse.x, targetY = mouse.y + 30;
+  f.x = lerp(f.x, targetX, Math.min(1, dt * 18));
+  f.y = lerp(f.y, targetY, Math.min(1, dt * 18));
+  f.x = clamp(f.x, 14, W - 14);
+  f.facing = mouse.vx < -20 ? -1 : mouse.vx > 20 ? 1 : f.facing;
+  f.walk += dt * 4;
+}
+
+// ====================================================================
+//  UI WIRING
+// ====================================================================
+const toolbar = document.getElementById('toolbar');
+const palette = document.getElementById('palette');
+const hintEl = document.getElementById('hint');
+let hintTimer = 0;
+
+PAINT_COLORS.forEach((c, i) => {
+  const s = document.createElement('div');
+  s.className = 'swatch' + (i === 0 ? ' sel' : ''); s.style.background = c; s.dataset.color = c;
+  s.addEventListener('click', () => {
+    paintColor = c;
+    [...palette.children].forEach(ch => ch.classList.toggle('sel', ch === s));
+  });
+  palette.appendChild(s);
+});
+
+document.querySelectorAll('.tool').forEach(btn => {
+  btn.addEventListener('click', () => {
+    tool = btn.dataset.tool;
+    document.querySelectorAll('.tool').forEach(b => b.classList.toggle('active', b === btn));
+    palette.classList.toggle('show', tool === 'paint');
+    recomputeWeaponStolen();          // re-arm the cursor unless a thief holds THIS tool
+    if (dragged) { dragged.state = 'getup'; dragged = null; }
+    Sound.ensure(); Sound.resume();
+    if (tool === 'saber') Sound.startSaber(); else Sound.stopSaber();
+  });
+});
+
+document.getElementById('muteBtn').addEventListener('click', () => {
+  Sound.ensure();
+  Sound.muted = !Sound.muted;
+  document.getElementById('muteBtn').textContent = Sound.muted ? '🔇' : '🔊';
+  if (Sound.muted) Sound.stopSaber(); else if (tool === 'saber') { Sound.resume(); Sound.startSaber(); }
+});
+document.getElementById('resetBtn').addEventListener('click', () => {
+  pctx.clearRect(0, 0, W, H);
+  foods.length = 0; particles.length = 0; pendingSpawns = 0; weaponStolen = false; dragged = null;
+  spawnInitial();
+  flashHint('Fresh sandbox!');
+});
+
+function flashHint(msg) {
+  hintEl.innerHTML = msg; hintEl.style.opacity = '1'; hintTimer = 3.2;
+}
+
+// ====================================================================
+//  MAIN LOOP
+// ====================================================================
+function init() {
+  resize();
+  spawnInitial();
+  requestAnimationFrame(loop);
+}
+let last = 0;
+function loop(ts) {
+  if (!last) last = ts;
+  let dt = (ts - last) / 1000; last = ts;
+  dt = Math.min(0.033, dt);     // clamp big frame gaps
+
+  cloudT += dt;
+  tickDrag(dt);
+  update(dt);
+  render();
+
+  if (hintTimer > 0) { hintTimer -= dt; if (hintTimer <= 0) hintEl.style.opacity = '0'; }
+  requestAnimationFrame(loop);
+}
+init();
+</script>
+</body>
+</html>
