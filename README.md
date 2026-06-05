@@ -43,13 +43,15 @@ recoil and scrub it out: the nickname box runs a leet-aware profanity filter (so
 Three **special characters** roam the world — you'll spot them by their **open-circle heads** and
 permanent name tags:
 
-- 🖤 **The Chosen One** — fires **laser eyes** and **fire from his hands** when attacked.
-- 🧡 **The Chosen One 2.0** — **regenerates fast** and fights with **drawn weapons** (his own, or the
-  ones you sketch with the ✏️ Pencil).
-- ❤️ **The Dark Lord** — the villain. Every so often he goes on a **rampage** and charges The Chosen
-  One; the heroes blast and bash him until he's defeated. Everyone who falls **regenerates** and gets
-  back up (the Dark Lord and the black Chosen One take a few seconds; the orange 2.0 bounces back almost
-  instantly).
+- 🖤 **The Chosen One** — **flies**, and fires **laser eyes** + **fire from his hands** when attacked.
+- 🧡 **The Chosen One 2.0** — **flies**, **regenerates fast**, and fights with **drawn weapons** (his
+  own, or the ones you sketch with the ✏️ Pencil).
+- ❤️ **The Dark Lord** — the villain. He's **away most of the time and appears every ~2 minutes** to
+  go on a **rampage**, charging The Chosen One. The heroes take to the **air** and blast/bash him until
+  he's defeated, then he **vanishes** until the next attack. Heroes who fall **regenerate** and get back
+  up (the black Chosen One takes a few seconds; the orange 2.0 bounces back almost instantly).
+
+Between battles the two heroes drift around on lazy **joy-flights** — keep an eye on the skies.
 
 They're **immune to your tools** — and if you try to attack one, or let the Dark Lord get to your
 cursor during a rampage, he'll **catch and erase your cursor** 💀. To get it back, **switch to another

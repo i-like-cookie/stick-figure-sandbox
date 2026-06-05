@@ -223,8 +223,8 @@ const SPECIALS = {
   darklord: { color: '#ff1130', name: 'The Dark Lord',      regen: 5, hero: false, power: null   },
 };
 const DL_HP = 4;             // Dark Lord hit points per rampage
-const DL_PERIOD = 300;       // ~5 minutes between attacks
-const DL_FIRST = 25;         // first attack soon after load so it's seen
+const DL_PERIOD = 120;       // 2 minutes between attacks
+const DL_FIRST = 120;        // he stays away until the first 2 minutes are up
 
 let tool = 'drag';
 let paintColor = PAINT_COLORS[0];
@@ -293,8 +293,10 @@ function makeFigure(x, fromEdge) {
     down: false, regenT: 0, regenWait: 0, aura: 0,   // knocked-out / regenerating
     sstate: 'wander',              // special sub-state
     hp: 0, attackT: 0, rampageT: 0, targetId: null,  // Dark Lord combat
-    powerCool: 0, drawCool: 0, unleashT: 0, clashCool: 0, blastTargetX: 0,
+    powerCool: 0, drawCool: 0, unleashT: 0, clashCool: 0, blastTargetX: 0, blastTargetY: 0,
     heldWeapon: null, wtarget: 0, wT: 0,
+    absent: false,                 // Dark Lord is off-world between attacks
+    alt: 0, altTarget: 0, flyT: 0, // flight altitude (heroes can fly)
   };
   pickWander(f);
   return f;
@@ -308,6 +310,8 @@ function makeSpecial(key, x) {
   f.hp = key === 'darklord' ? DL_HP : 0;
   f.attackT = key === 'darklord' ? DL_FIRST : 0;
   f.state = 'walk';
+  if (key === 'darklord') { f.absent = true; f.sstate = 'absent'; }   // hidden until his first attack
+  else f.flyT = rand(3, 6);                                            // heroes start grounded
   return f;
 }
 function pickWander(f) {
@@ -698,60 +702,79 @@ function updateBattle(dt) {
     if (f.down) { f.regenT -= dt; f.aura = clamp(1 - f.regenT / f.regenWait, 0, 1); if (f.regenT <= 0) reviveSpecial(f); }
   }
 
-  // --- The Dark Lord ---
-  if (!DL.down) {
+  // --- The Dark Lord (absent between attacks; appears every DL_PERIOD) ---
+  if (DL.absent) {
     DL.attackT -= dt;
-    if (DL.sstate === 'wander') {
-      wanderStep(DL, dt, 46);
-      if (DL.attackT <= 0) startRampage(DL);
-    } else {                                      // rampaging
-      DL.rampageT -= dt;
-      let tgt = byId(DL.targetId);
-      if (!tgt || tgt.down) { tgt = nearestUpHero(DL); DL.targetId = tgt ? tgt.id : null; }
-      if (DL.rampageT <= 0) endRampage(DL);
-      else if (tgt) {
-        faceTo(DL, tgt.x);
-        DL.x += DL.facing * 150 * dt; DL.walk += dt * 16;
-        if (Math.abs(tgt.x - DL.x) < 36 && DL.clashCool <= 0) resolveClash(DL, tgt);
-      }                                           // (no hero up: he waits for one to revive)
-      catchCursorIfNear(DL);
-      DL.swing *= Math.pow(0.02, dt);
-    }
+    if (DL.attackT <= 0) spawnDarkLord(DL);
+  } else {                                        // present & rampaging
+    DL.rampageT -= dt;
+    let tgt = byId(DL.targetId);
+    if (!tgt || tgt.down) { tgt = nearestUpHero(DL); DL.targetId = tgt ? tgt.id : null; }
+    if (DL.rampageT <= 0) endRampage(DL);
+    else if (tgt) {
+      faceTo(DL, tgt.x);
+      DL.x += DL.facing * 150 * dt; DL.walk += dt * 16;
+      if (Math.abs(tgt.x - DL.x) < 36 && DL.clashCool <= 0) resolveClash(DL, tgt);
+    }                                             // (no hero up: he waits for one to revive)
+    catchCursorIfNear(DL);
+    DL.swing *= Math.pow(0.02, dt);
     DL.x = clamp(DL.x, 14, W - 14);
   }
 
-  // --- the heroes ---
-  const rampaging = !DL.down && DL.sstate === 'charge';
+  // --- the heroes (they can fly) ---
+  const rampaging = !DL.absent;
   for (const H of [chosenRef, chosen2Ref]) {
     if (!H || H.down) continue;
     if (rampaging) {
-      if (H.power === 'drawn') {                  // orange: get a weapon, charge in, bash
+      H.altTarget = 64;                           // take to the air to fight
+      if (H.power === 'drawn') {                  // orange: fetch a weapon, close in, bash
         if (!H.heldWeapon) acquireWeapon(H, dt);
         if (H.heldWeapon) {
-          faceTo(H, DL.x); H.sstate = 'charge';
-          if (Math.abs(DL.x - H.x) > 34) { H.x += H.facing * 130 * dt; H.walk += dt * 14; }
+          faceTo(H, DL.x); H.sstate = 'fly';
+          if (Math.abs(DL.x - H.x) > 34) { H.x += H.facing * 150 * dt; H.walk += dt * 14; }
           else if (H.clashCool <= 0) resolveClash(H, DL);
         }
-      } else { H.sstate = 'brace'; faceTo(H, DL.x); }   // black: braces; blasts when the Dark Lord reaches it
+      } else {                                    // black: hovers near the Dark Lord and blasts
+        H.sstate = 'fly'; faceTo(H, DL.x);
+        if (Math.abs(DL.x - H.x) > 120) { H.x += (DL.x > H.x ? 1 : -1) * 95 * dt; H.walk += dt * 12; }
+      }
       H.swing *= Math.pow(0.02, dt);
     } else {
-      H.sstate = 'wander'; wanderStep(H, dt, 52);
+      // peacetime: occasional joy-flight
+      H.flyT -= dt;
+      if (H.flyT <= 0) {
+        if (H.altTarget > 10) { H.altTarget = 0; H.flyT = rand(4, 9); }
+        else { H.altTarget = rand(46, 78); H.flyT = rand(2.5, 5); }
+      }
+      H.sstate = H.altTarget > 10 ? 'fly' : 'wander';
+      wanderStep(H, dt, H.altTarget > 10 ? 72 : 52);
     }
+    // ease altitude + gentle hover bob
+    H.alt += (H.altTarget - H.alt) * Math.min(1, dt * 4);
+    H.y = groundY - H.alt - (H.alt > 10 ? Math.sin(H.t * 4) * 3 : 0);
     H.x = clamp(H.x, 14, W - 14);
   }
 }
 
-function startRampage(DL) {
-  DL.sstate = 'charge'; DL.hp = DL_HP; DL.rampageT = 42; DL.clashCool = 0;
+function spawnDarkLord(DL) {                       // materialise at a screen edge and rampage
+  DL.absent = false; DL.down = false; DL.sx = 1; DL.sy = 1;
+  DL.x = Math.random() < 0.5 ? 24 : W - 24; DL.y = groundY;
+  DL.hp = DL_HP; DL.sstate = 'charge'; DL.rampageT = 42; DL.clashCool = 0; DL.powerCool = 0;
   const t = nearestUpHero(DL); DL.targetId = t ? t.id : null;
-  flashHint('💀 The Dark Lord attacks The Chosen One!'); Sound.bonk();
+  for (let i = 0; i < 16; i++) addParticle({ kind: 'spark', x: DL.x, y: DL.y - rand(8, 64),
+    vx: rand(-160, 160), vy: rand(-220, 60), life: rand(0.4, 0.9), size: rand(2, 5),
+    color: choice(['#ff2b4d', '#7a0014', '#3a0010']), g: 140 });
+  shake = Math.max(shake, 13);
+  flashHint('💀 The Dark Lord appears!'); Sound.bonk();
 }
-function endRampage(DL) {
-  DL.sstate = 'wander'; DL.attackT = DL_PERIOD; DL.targetId = null;
+function endRampage(DL) {                          // vanish until the next attack
+  DL.absent = true; DL.sstate = 'absent'; DL.attackT = DL_PERIOD; DL.targetId = null;
+  for (let i = 0; i < 12; i++) addParticle({ kind: 'spark', x: DL.x, y: DL.y - rand(8, 54),
+    vx: rand(-130, 130), vy: rand(-170, 30), life: rand(0.3, 0.7), size: rand(2, 4), color: '#5a0018', g: 120 });
   // a hero still mid-charge drops its weapon to the ground (no frozen-arm glitch / stuck array entry)
   for (const H of [chosenRef, chosen2Ref]) {
     if (H && H.heldWeapon) {
-      const w = H.heldWeapon; H.heldWeapon = null; H.swing = 0; H.sstate = 'wander';
+      const w = H.heldWeapon; H.heldWeapon = null; H.swing = 0;
       w.held = false; w.x = H.x; w.y = groundY - 2; w.onGround = true; w.vy = 0;
     }
   }
@@ -760,7 +783,7 @@ function endRampage(DL) {
 function resolveClash(a, b) {
   const DL = a.special === 'darklord' ? a : b;
   const H  = a.special === 'darklord' ? b : a;
-  if (!DL || !H || DL.down || H.down) return;
+  if (!DL || !H || DL.absent || DL.down || H.down) return;
   DL.clashCool = 0.8; H.clashCool = 0.8;
   if (H.power === 'blast' && H.powerCool <= 0) heroBlast(H, DL);
   else if (H.power === 'drawn' && H.heldWeapon) heroBash(H, DL);
@@ -769,7 +792,7 @@ function resolveClash(a, b) {
   if (DL.hp <= 0) defeatDarkLord(DL);
 }
 function heroBlast(H, DL) {                        // laser eyes + fire from the hands
-  DL.hp -= 2; H.powerCool = 6; H.unleashT = 0.9; H.blastTargetX = DL.x; H.sstate = 'blast';
+  DL.hp -= 2; H.powerCool = 6; H.unleashT = 0.9; H.blastTargetX = DL.x; H.blastTargetY = DL.y - 30; H.sstate = 'blast';
   const dir = DL.x > H.x ? 1 : -1;
   for (let i = 0; i < 18; i++) addParticle({ kind: 'flame', x: H.x + dir * 13, y: H.y - 34 + rand(-4, 4),
     vx: dir * rand(140, 360), vy: rand(-50, 50), life: rand(0.3, 0.7), size: rand(8, 16),
@@ -784,18 +807,23 @@ function heroBash(H, DL) {                         // bash with a drawn weapon
 function knockDown(f) {
   f.down = true; f.regenT = f.regenWait; f.aura = 0; f.sstate = 'down';
   f.sx = 1.5; f.sy = 0.45; f.heldWeapon = null;
+  f.alt = 0; f.altTarget = 0; f.y = groundY;           // a flying hero falls to the ground
   burstStars(f.x, f.y - 28, 8); shake = Math.max(shake, 10); Sound.bonk();
 }
 function reviveSpecial(f) {
   f.down = false; f.sx = 1; f.sy = 1; f.aura = 0; f.sstate = 'wander';
   f.powerCool = 0; f.clashCool = 0; f.unleashT = 0;   // ready to fight again (no post-revive no-op clash)
-  if (f.special === 'darklord') { f.hp = DL_HP; f.attackT = DL_PERIOD; f.targetId = null; }
+  if (f.special === 'darklord') { f.absent = true; f.sstate = 'absent'; f.attackT = DL_PERIOD; f.targetId = null; }
   for (let i = 0; i < 10; i++) addParticle({ kind: 'spark', x: f.x + rand(-10, 10), y: f.y - rand(10, 58),
     vx: rand(-120, 120), vy: rand(-200, -40), life: rand(0.4, 0.8), size: rand(2, 4),
     color: f.special === 'darklord' ? '#ff5a78' : '#9bf6ff', g: 200 });
   Sound.pop();
 }
-function defeatDarkLord(DL) { knockDown(DL); flashHint('💥 The Chosen Ones defeated The Dark Lord!'); }
+function defeatDarkLord(DL) {                      // big finish, then he vanishes
+  flashHint('💥 The Chosen Ones defeated The Dark Lord!');
+  burstStars(DL.x, DL.y - 30, 14); shake = Math.max(shake, 16);
+  endRampage(DL);
+}
 
 // orange picks up the nearest grounded drawn weapon, or sketches his own
 function acquireWeapon(H, dt) {
@@ -1018,6 +1046,7 @@ function drawClouds() {
 
 // --- the heart of the look: a procedural stick figure ---
 function drawFigure(f) {
+  if (f.absent) return;                          // Dark Lord is off-world between attacks
   const h = figHeight(f);
   const headR = 9;
   if (f.down) { drawDownSpecial(f); return; }   // knocked-out special, regenerating
@@ -1041,6 +1070,7 @@ function drawFigure(f) {
   if (f.state === 'squashed') { lA = -1.0; lB = 1.0; }
   else if (f.state === 'leap') { lA = -0.6; lB = 0.5; }
   else if (f.state === 'eating') { lA = -0.15; lB = 0.15; }
+  else if (f.alt > 12) { lA = 0.4; lB = 0.3; }   // legs together, trailing (flight)
   else { const sw = Math.sin(phase) * 0.5; lA = sw; lB = -sw; }
   leg(hipY, lA); leg(hipY, lB);
 
@@ -1104,6 +1134,10 @@ function drawArms(f, shoulderY) {
     drawHeldDrawnWeapon(hand.x, hand.y, ang, f.heldWeapon, f.facing);
     return;
   }
+  if (f.alt > 12) {                                                // swept-back flight pose
+    swingArm(2.6, 12, 12, -0.15); swingArm(-2.6, 12, 12, 0.15);
+    return;
+  }
   if (f.state === 'dragged') {
     const fl = Math.sin(f.walk * 6) * 0.6;
     swingArm(2.4 + fl, 11, 12, 0.5); swingArm(-2.4 - fl, 11, 12, -0.5);
@@ -1157,7 +1191,7 @@ function drawBlade(ax, ay, bx, by, color) {
 function drawLasers(f) {
   const h = figHeight(f);
   const ex = f.x + f.facing * 2, ey = f.y - h + 8;   // eye-line
-  const tx = f.blastTargetX, ty = f.y - 32;
+  const tx = f.blastTargetX, ty = f.blastTargetY || (f.y - 32);   // aim down at the Dark Lord
   const a = clamp(f.unleashT / 0.3, 0, 1);
   const flick = 0.6 + 0.4 * Math.sin(f.unleashT * 70);
   ctx.save(); ctx.lineCap = 'round'; ctx.globalAlpha = a;
@@ -1359,7 +1393,7 @@ function pointerPos(e) {
 function figureAt(x, y, r = 26) {
   let best = null, bd = r;
   for (const f of figures) {
-    if (f.dead || f.state === 'ragdoll') continue;
+    if (f.dead || f.absent || f.state === 'ragdoll') continue;
     const d = dist(x, y - figHeight(f) * 0.5, f.x, f.y - figHeight(f) * 0.5);
     if (d < bd) { bd = d; best = f; }
   }
