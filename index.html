@@ -224,7 +224,7 @@ const SPECIALS = {
 };
 const DL_HP = 4;             // Dark Lord hit points per rampage
 const DL_PERIOD = 120;       // 2 minutes between attacks
-const DL_FIRST = 120;        // he stays away until the first 2 minutes are up
+const DL_FIRST = 30;         // his first appearance lands within the opening 30 seconds
 const JAIL_TIME = 180;       // 3 minutes locked up before he escapes
 
 let tool = 'drag';
@@ -312,7 +312,7 @@ function makeSpecial(key, x) {
   f.color = cfg.color; f.name = cfg.name; f.hero = cfg.hero; f.power = cfg.power;
   f.regenWait = cfg.regen; f.sstate = 'wander';
   f.hp = key === 'darklord' ? DL_HP : 0;
-  f.attackT = key === 'darklord' ? DL_FIRST : 0;
+  f.attackT = key === 'darklord' ? rand(18, DL_FIRST) : 0;
   f.state = 'walk';
   if (key === 'darklord') { f.absent = true; f.sstate = 'absent'; }   // hidden until his first attack
   else f.flyT = rand(3, 6);                                            // heroes start grounded
