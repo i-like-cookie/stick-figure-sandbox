@@ -74,7 +74,7 @@
   <button class="mini" id="resetBtn" title="Reset world">🔄</button>
 </div>
 
-<div id="hint">Pick a tool above. <b class="k">Tip:</b> while holding the hammer or saber, the stick figures may leap up and <b class="k">snatch it</b> to bash each other — lift your cursor toward the top of the screen to keep it safe. Click an armed figure to grab it back. With <b class="k">🏷️ Name</b>, click a figure to nickname it. Watch for <b class="k">The Chosen One</b> &amp; <b class="k">The Dark Lord</b> — and use <b class="k">✏️ Pencil</b> to sketch weapons for The Chosen One 2.0 — or draw <b class="k">handcuffs</b> (two linked loops) and he'll jail the Dark Lord! Don't let the Dark Lord catch your cursor.</div>
+<div id="hint">Pick a tool above. <b class="k">Tip:</b> while holding the hammer or saber, the stick figures may leap up and <b class="k">snatch it</b> to bash each other — lift your cursor toward the top of the screen to keep it safe. Click an armed figure to grab it back. With <b class="k">🏷️ Name</b>, click a figure to nickname it. Watch for <b class="k">The Chosen One</b> &amp; <b class="k">The Dark Lord</b> — and use <b class="k">✏️ Pencil</b> to sketch weapons for The Chosen One 2.0: a <b class="k">triangle on a line</b> = spear, a <b class="k">half-circle</b> = bow, or <b class="k">two linked loops</b> = handcuffs to jail the Dark Lord! Don't let the Dark Lord catch your cursor.</div>
 
 <input id="nameInput" maxlength="14" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="name…" />
 
@@ -234,6 +234,7 @@ const figures = [];
 const particles = [];
 const foods = [];
 const weapons = [];          // drawn weapons (player- or 2.0-sketched)
+const arrows = [];           // arrows in flight (fired by the bow-wielding hero)
 let pendingSpawns = 0;        // figures queued to walk back in
 let spawnTimer = 0;
 
@@ -323,7 +324,7 @@ function pickWander(f) {
   f.facing = f.target < f.x ? -1 : 1;
 }
 function spawnInitial() {
-  figures.length = 0; weapons.length = 0;
+  figures.length = 0; weapons.length = 0; arrows.length = 0;
   chosenRef  = makeSpecial('chosen',   W * 0.30);
   chosen2Ref = makeSpecial('chosen2',  W * 0.50);
   darkLordRef = makeSpecial('darklord', W * 0.72);
@@ -440,6 +441,7 @@ function update(dt) {
   // Heroes vs. villain + drawn weapons.
   updateBattle(dt);
   updateWeapons(dt);
+  updateArrows(dt);
 
   // Snatch logic: a calm figure may leap for the player's weapon.
   trySnatch(dt);
@@ -734,12 +736,18 @@ function updateBattle(dt) {
     if (!H || H.down) continue;
     if (rampaging) {
       H.altTarget = 64;                           // take to the air to fight
-      if (H.power === 'drawn') {                  // orange: fetch a weapon, close in, bash
+      if (H.power === 'drawn') {                  // orange: fetch a weapon, then fight by its type
         if (!H.heldWeapon) acquireWeapon(H, dt);
         if (H.heldWeapon) {
-          faceTo(H, DL.x); H.sstate = 'fly';
-          if (Math.abs(DL.x - H.x) > 34) { H.x += H.facing * 150 * dt; H.walk += dt * 14; }
-          else if (H.clashCool <= 0) resolveClash(H, DL);
+          const wt = H.heldWeapon.type;
+          if (wt === 'bow') {                      // hang back and fire arrows
+            bowKiteFire(H, DL, dt);
+          } else {                                 // cuffs / spear / weapon: close in (spear reaches farther)
+            faceTo(H, DL.x); H.sstate = 'fly';
+            const reach = wt === 'spear' ? 52 : 34;
+            if (Math.abs(DL.x - H.x) > reach) { H.x += H.facing * 150 * dt; H.walk += dt * 14; }
+            else if (H.clashCool <= 0) resolveClash(H, DL);
+          }
         }
       } else {                                    // black: hovers near the Dark Lord and blasts
         H.sstate = 'fly'; faceTo(H, DL.x);
@@ -792,12 +800,14 @@ function resolveClash(a, b) {
   const H  = a.special === 'darklord' ? b : a;
   if (!DL || !H || DL.absent || DL.down || DL.jailed || H.down) return;
   DL.clashCool = 0.8; H.clashCool = 0.8;
-  // capture path: handcuffs win the clash outright (no hero knockdown, no damage)
-  if (H.power === 'drawn' && H.heldWeapon && H.heldWeapon.type === 'cuffs') { cuffDarkLord(H, DL); return; }
-  if (H.power === 'blast' && H.powerCool <= 0) heroBlast(H, DL);
-  else if (H.power === 'drawn' && H.heldWeapon) heroBash(H, DL);
+  if (H.power === 'drawn' && H.heldWeapon) {
+    const t = H.heldWeapon.type;
+    if (t === 'cuffs') { cuffDarkLord(H, DL); return; }   // capture: no knockdown, no damage
+    if (t === 'spear') heroSpear(H, DL);                  // long thrust, 2 HP
+    else if (t !== 'bow') heroBash(H, DL);                // generic bash, 1 HP (a bow can't melee)
+  } else if (H.power === 'blast' && H.powerCool <= 0) heroBlast(H, DL);
   DL.swing = 1;
-  knockDown(H);                                   // the Dark Lord strikes the hero down
+  knockDown(H);                                   // the Dark Lord strikes the hero down (bow is lost here)
   if (DL.hp <= 0) defeatDarkLord(DL);
 }
 function cuffDarkLord(H, DL) {                     // 2.0 cuffs the Dark Lord and draws a jail
@@ -820,23 +830,81 @@ function escapeJail(DL) {                          // breaks out after JAIL_TIME
   endRampage(DL);                                 // he vanishes; the normal 2-min timer resumes
 }
 
-// Does a pencil stroke look like handcuffs (~two loops/circles)?
-function looksLikeCuffs(pts) {
+// ---- pencil shape recognition: cuffs (2 loops) / bow (arc) / spear (head+shaft) / weapon ----
+function strokeBounds(pts) {
   let minx = 1e9, maxx = -1e9, miny = 1e9, maxy = -1e9;
   for (const p of pts) { minx = Math.min(minx, p.x); maxx = Math.max(maxx, p.x); miny = Math.min(miny, p.y); maxy = Math.max(maxy, p.y); }
-  const diag = Math.hypot(maxx - minx, maxy - miny);
-  if (diag < 40 || pts.length < 8) return false;
-  const near = Math.max(14, 0.16 * diag);
+  return { minx, maxx, miny, maxy, w: maxx - minx, h: maxy - miny, diag: Math.hypot(maxx - minx, maxy - miny) };
+}
+// Points where the path closes back near an earlier point (one per loop/circle).
+function loopClosures(pts) {
+  const b = strokeBounds(pts);
+  if (b.diag < 40 || pts.length < 8) return [];
+  const near = Math.max(14, 0.16 * b.diag);
   const minArc = Math.max(6, Math.floor(pts.length * 0.12));
-  let loops = 0, i = minArc;
-  while (i < pts.length) {                          // count how many times the path closes a loop
+  const cl = []; let i = minArc;
+  while (i < pts.length) {
     let found = false;
     for (let j = 0; j <= i - minArc; j++) {
       if (Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y) < near) { found = true; break; }
     }
-    if (found) { loops++; i += minArc; } else i++;
+    if (found) { cl.push(pts[i]); i += minArc; } else i++;
   }
-  return loops >= 2;
+  return cl;
+}
+// Longest contiguous near-straight run of the stroke (≈ a spear shaft).
+// Returns its length and whether it sits at an endpoint (a tail) vs. the middle.
+function longestStraightRun(pts) {
+  const n = pts.length;
+  let best = 0, bestAtEnd = false, i = 0;
+  while (i < n - 1) {
+    let j = i + 1;
+    while (j + 1 < n) {
+      const a = pts[i], b = pts[j + 1];
+      let dev = 0;
+      for (let k = i + 1; k <= j; k++) dev = Math.max(dev, segDist(pts[k].x, pts[k].y, a.x, a.y, b.x, b.y));
+      if (dev > 6) break;
+      j++;
+    }
+    const len = Math.hypot(pts[j].x - pts[i].x, pts[j].y - pts[i].y);
+    if (len > best) { best = len; bestAtEnd = (i === 0 || j === n - 1); }
+    i = j > i ? j : i + 1;
+  }
+  return { len: best, atEnd: bestAtEnd };
+}
+// Long thin shape: farthest-apart pair is the length, max perpendicular spread is the width.
+function isElongated(pts) {
+  let ax = pts[0], bx = pts[pts.length - 1], D = 0;
+  for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) {
+    const d = Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y);
+    if (d > D) { D = d; ax = pts[i]; bx = pts[j]; }
+  }
+  if (D < 36) return false;
+  let wd = 0;
+  for (const p of pts) wd = Math.max(wd, segDist(p.x, p.y, ax.x, ax.y, bx.x, bx.y));
+  return D / Math.max(wd, 6) > 2.4;
+}
+// A smooth, one-sided bulge between the endpoints (a half-circle / bow).
+function looksLikeArc(pts) {
+  const a = pts[0], b = pts[pts.length - 1];
+  const dx = b.x - a.x, dy = b.y - a.y, chord = Math.hypot(dx, dy);
+  if (chord < 36) return false;
+  let depth = 0, pos = 0, neg = 0;
+  for (const p of pts) {
+    const s = ((p.x - a.x) * dy - (p.y - a.y) * dx) / chord;   // signed distance from the chord line
+    if (s > 1) pos++; else if (s < -1) neg++;
+    depth = Math.max(depth, Math.abs(s));
+  }
+  const ratio = depth / chord, oneSided = Math.max(pos, neg) > 0.85 * (pos + neg + 1e-6);
+  return ratio > 0.2 && ratio < 1.6 && oneSided && depth > 12;
+}
+function classifyStroke(pts) {
+  const cl = loopClosures(pts), diag = strokeBounds(pts).diag || 1;
+  if (cl.length === 0 && looksLikeArc(pts)) return 'bow';                 // open half-circle
+  const run = longestStraightRun(pts);                                    // a spear's shaft is a straight tail
+  if (cl.length >= 1 && run.atEnd && run.len / diag > 0.4 && isElongated(pts)) return 'spear';  // head + shaft
+  if (cl.length >= 2) return 'cuffs';                                     // two loops, no shaft = two circles
+  return 'weapon';                                                        // straight scribble / fallback
 }
 function heroBlast(H, DL) {                        // laser eyes + fire from the hands
   DL.hp -= 2; H.powerCool = 6; H.unleashT = 0.9; H.blastTargetX = DL.x; H.blastTargetY = DL.y - 30; H.sstate = 'blast';
@@ -851,9 +919,47 @@ function heroBash(H, DL) {                         // bash with a drawn weapon
   const i = weapons.indexOf(w); if (i >= 0) weapons.splice(i, 1);
   H.swing = 1; burstStars((H.x + DL.x) / 2, DL.y - 36, 6); shake = Math.max(shake, 8); Sound.bonk();
 }
+function heroSpear(H, DL) {                        // a long lunging thrust — heavier hit than a bash
+  DL.hp -= 2; const w = H.heldWeapon; H.heldWeapon = null;
+  const i = weapons.indexOf(w); if (i >= 0) weapons.splice(i, 1);
+  H.swing = 1; burstStars((H.x + DL.x) / 2, DL.y - 34, 9); shake = Math.max(shake, 11); Sound.bonk();
+}
+// Bow hero: keep a standoff distance and loose an arrow on a short cooldown.
+function bowKiteFire(H, DL, dt) {
+  faceTo(H, DL.x); H.sstate = 'fly';
+  const d = Math.abs(DL.x - H.x), STAND = 200;
+  if (d < STAND - 30) { H.x -= H.facing * 130 * dt; H.walk += dt * 13; }        // too close: back away
+  else if (d > STAND + 50) { H.x += H.facing * 110 * dt; H.walk += dt * 13; }   // too far: close to range
+  H.x = clamp(H.x, 14, W - 14);
+  if (H.powerCool <= 0) { fireArrow(H, DL); H.powerCool = 1.1; H.swing = 1; }   // pluck the string
+}
+function fireArrow(H, DL) {
+  const sx = H.x + H.facing * 12, sy = H.y - 34;
+  const ang = Math.atan2((DL.y - 34) - sy, DL.x - sx), spd = 780;
+  arrows.push({ x: sx, y: sy, vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd, ang, t: 0, life: 1.5 });
+  Sound.whoosh();
+}
+function updateArrows(dt) {
+  const DL = darkLordRef;
+  for (let i = arrows.length - 1; i >= 0; i--) {
+    const a = arrows[i];
+    a.t += dt; a.x += a.vx * dt; a.y += a.vy * dt;
+    let gone = a.t > a.life || a.x < -30 || a.x > W + 30 || a.y > groundY + 12 || a.y < -60;
+    if (DL && !DL.absent && !DL.jailed && !DL.down && dist(a.x, a.y, DL.x, DL.y - 34) < 26) {
+      DL.hp -= 1; burstStars(DL.x, DL.y - 34, 5); shake = Math.max(shake, 7); Sound.bonk();
+      if (DL.hp <= 0) defeatDarkLord(DL);
+      gone = true;
+    }
+    if (gone) arrows.splice(i, 1);
+  }
+}
 function knockDown(f) {
   f.down = true; f.regenT = f.regenWait; f.aura = 0; f.sstate = 'down';
-  f.sx = 1.5; f.sy = 0.45; f.heldWeapon = null;
+  f.sx = 1.5; f.sy = 0.45;
+  if (f.heldWeapon) {                                   // a still-held weapon (e.g. a bow) falls free, not orphaned
+    const w = f.heldWeapon; w.held = false; w.x = f.x; w.y = groundY - 2; w.onGround = true; w.vy = 0;
+  }
+  f.heldWeapon = null;
   f.alt = 0; f.altTarget = 0; f.y = groundY;           // a flying hero falls to the ground
   burstStars(f.x, f.y - 28, 8); shake = Math.max(shake, 10); Sound.bonk();
 }
@@ -938,14 +1044,17 @@ function finishPencil() {
   if (!pts || pts.length < 2) return;
   let cx = 0, cy = 0; for (const p of pts) { cx += p.x; cy += p.y; } cx /= pts.length; cy /= pts.length;
   const local = pts.map(p => ({ x: p.x - cx, y: p.y - cy }));
-  const cuffs = looksLikeCuffs(pts);               // two loops -> handcuffs
+  const kind = classifyStroke(pts);                // 'cuffs' | 'spear' | 'bow' | 'weapon'
   const w = makeDrawnWeapon(cx, Math.min(cy, groundY - 2), local);
-  w.type = cuffs ? 'cuffs' : 'weapon';
+  w.type = kind;
   w.onGround = Math.abs(cy - (groundY - 2)) < 8;   // drawn near the ground? already there, else it drops
   weapons.push(w);
   while (weapons.length > 12) { const idx = weapons.findIndex(x => !x.held); if (idx < 0) break; weapons.splice(idx, 1); }
   pencilSparkle(cx, cy); Sound.pop();
-  if (cuffs) flashHint('🔗 Handcuffs! The Chosen One 2.0 will cuff the Dark Lord with these.');
+  const msg = { cuffs: '🔗 Handcuffs! The Chosen One 2.0 will cuff &amp; jail the Dark Lord.',
+                spear: '🔱 A spear! The Chosen One 2.0 will run the Dark Lord through.',
+                bow:   '🏹 A bow! The Chosen One 2.0 will shoot the Dark Lord from afar.' }[kind];
+  if (msg) flashHint(msg);
 }
 
 // ====================================================================
@@ -1065,6 +1174,9 @@ function render() {
 
   // figures
   for (const f of figures) drawFigure(f);
+
+  // arrows in flight (above the figures)
+  for (const a of arrows) drawArrow(a);
 
   // particles
   for (const p of particles) drawParticle(p);
@@ -1190,10 +1302,16 @@ function drawArms(f, shoulderY) {
   }
   if (f.special && f.heldWeapon) {
     swingArm(-2.5, 11, 12, -0.4);                                 // off-hand
-    const cuffs = f.heldWeapon.type === 'cuffs';
-    const ang = cuffs ? 1.7 : lerp(2.2, 0.55, f.swing);          // cuffs held out; weapon swings down
+    const wt = f.heldWeapon.type;
+    let ang;
+    if (wt === 'cuffs') ang = 1.7;                                // held out
+    else if (wt === 'bow') ang = 1.5;                            // bow held forward
+    else if (wt === 'spear') ang = lerp(1.95, 1.05, f.swing);   // thrust forward on swing
+    else ang = lerp(2.2, 0.55, f.swing);                         // weapon swings down
     const hand = swingArm(ang, 12, 13, 0.3);
-    if (cuffs) drawCuffsIcon(hand.x, hand.y, 0.7);
+    if (wt === 'cuffs') drawCuffsIcon(hand.x, hand.y, 0.7);
+    else if (wt === 'bow') drawBowIcon(hand.x, hand.y, 0.95, f.facing);
+    else if (wt === 'spear') drawSpearIcon(hand.x, hand.y, 1, f.facing, false);
     else drawHeldDrawnWeapon(hand.x, hand.y, ang, f.heldWeapon, f.facing);
     return;
   }
@@ -1297,6 +1415,8 @@ function drawHeldDrawnWeapon(x, y, ang, w, facing) {
 }
 function drawGroundWeapon(w) {
   if (w.type === 'cuffs') { drawCuffsIcon(w.x, w.y - 6, 1); return; }
+  if (w.type === 'spear') { drawSpearIcon(w.x, w.y - 8, 1, 1, true); return; }
+  if (w.type === 'bow')   { drawBowIcon(w.x, w.y - 11, 1, 1); return; }
   ctx.save(); ctx.translate(w.x, w.y);
   ctx.strokeStyle = '#33333d'; ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
   ctx.beginPath();
@@ -1311,6 +1431,37 @@ function drawCuffsIcon(x, y, s) {
   ctx.beginPath(); ctx.arc(-8, 0, 6.5, 0, 7); ctx.stroke();
   ctx.beginPath(); ctx.arc(8, 0, 6.5, 0, 7); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(-1.5, 0); ctx.lineTo(1.5, 0); ctx.stroke();   // chain
+  ctx.restore();
+}
+// A spear glyph: a shaft with a triangular head (points along `facing`).
+function drawSpearIcon(x, y, s, facing, ground) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(facing < 0 ? -s : s, s);
+  ctx.rotate(ground ? -0.12 : -0.5);                    // lying flat vs. raised in hand
+  ctx.strokeStyle = '#7a5230'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-18, 0); ctx.lineTo(16, 0); ctx.stroke();                       // shaft
+  ctx.fillStyle = '#cdd6e0'; ctx.strokeStyle = '#9aa6b2'; ctx.lineWidth = 1; ctx.lineJoin = 'round';
+  ctx.beginPath(); ctx.moveTo(28, 0); ctx.lineTo(15, -5.5); ctx.lineTo(15, 5.5); ctx.closePath();
+  ctx.fill(); ctx.stroke();                                                                    // head
+  ctx.restore();
+}
+// A bow glyph: a curved limb opening toward `facing`, with a string.
+function drawBowIcon(x, y, s, facing) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(facing < 0 ? -s : s, s);
+  ctx.strokeStyle = '#7a5230'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.arc(-4, 0, 14, -1.15, 1.15); ctx.stroke();                              // limb
+  ctx.strokeStyle = '#e8e8e8'; ctx.lineWidth = 1.3;
+  const c = Math.cos(1.15) * 14 - 4, sN = Math.sin(1.15) * 14;
+  ctx.beginPath(); ctx.moveTo(c, -sN); ctx.lineTo(c, sN); ctx.stroke();                        // string
+  ctx.restore();
+}
+// A flying arrow (in world space; ang = travel direction).
+function drawArrow(a) {
+  ctx.save(); ctx.translate(a.x, a.y); ctx.rotate(a.ang);
+  ctx.strokeStyle = '#6b4a26'; ctx.lineWidth = 2.4; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-15, 0); ctx.lineTo(6, 0); ctx.stroke();                         // shaft
+  ctx.fillStyle = '#cdd6e0'; ctx.beginPath(); ctx.moveTo(8, 0); ctx.lineTo(0, -3.5); ctx.lineTo(0, 3.5); ctx.closePath(); ctx.fill();   // head
+  ctx.strokeStyle = '#dfe4ea'; ctx.lineWidth = 1.4;
+  ctx.beginPath(); ctx.moveTo(-15, 0); ctx.lineTo(-19, -3); ctx.moveTo(-15, 0); ctx.lineTo(-19, 3); ctx.stroke();   // fletching
   ctx.restore();
 }
 // A drawn jail cell around a captured Dark Lord, plus cuffs on his wrists.
