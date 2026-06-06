@@ -239,6 +239,7 @@ let pendingSpawns = 0;        // figures queued to walk back in
 let spawnTimer = 0;
 
 let shake = 0;                // screen-shake magnitude
+let cutscene = null;          // active jail cutscene; freezes the world while it plays
 
 // Battle refs + cursor-catch state
 let darkLordRef = null, chosenRef = null, chosen2Ref = null;
@@ -324,7 +325,7 @@ function pickWander(f) {
   f.facing = f.target < f.x ? -1 : 1;
 }
 function spawnInitial() {
-  figures.length = 0; weapons.length = 0; arrows.length = 0;
+  figures.length = 0; weapons.length = 0; arrows.length = 0; cutscene = null;
   chosenRef  = makeSpecial('chosen',   W * 0.30);
   chosen2Ref = makeSpecial('chosen2',  W * 0.50);
   darkLordRef = makeSpecial('darklord', W * 0.72);
@@ -377,6 +378,7 @@ function dropFood(x, y) {
 //  UPDATE
 // ====================================================================
 function update(dt) {
+  if (cutscene) { updateCutscene(dt); return; }   // the jail cutscene freezes the rest of the world
   // cursor velocity
   mouse.vx = (mouse.x - mouse.px) / dt;
   mouse.vy = (mouse.y - mouse.py) / dt;
@@ -450,15 +452,7 @@ function update(dt) {
   updateFoods(dt);
 
   // ---- particles ----
-  for (let i = particles.length - 1; i >= 0; i--) {
-    const p = particles[i];
-    p.t += dt;
-    p.vy += (p.g || 0) * dt;
-    p.x += p.vx * dt; p.y += p.vy * dt;
-    p.rot += (p.rotV || 0) * dt;
-    if (p.kind === 'piece' && p.y > p.floor) { p.y = p.floor; p.vy *= -0.4; p.vx *= 0.6; p.rotV *= 0.5; }
-    if (p.t > p.life) particles.splice(i, 1);
-  }
+  stepParticles(dt);
 
   // ---- respawns to maintain the ordinary population (specials never count/leave) ----
   if (countNormals() + pendingSpawns < NORMAL_POP) queueRespawn(NORMAL_POP - countNormals() - pendingSpawns);
@@ -476,6 +470,40 @@ function update(dt) {
   if (shake < 0.3) shake = 0;
   mouse.px = mouse.x; mouse.py = mouse.y;
   saberPrev = blade;
+}
+
+// Advance every particle one step (shared by the normal loop and the cutscene).
+function stepParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.t += dt;
+    p.vy += (p.g || 0) * dt;
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.rot += (p.rotV || 0) * dt;
+    if (p.kind === 'piece' && p.y > p.floor) { p.y = p.floor; p.vy *= -0.4; p.vx *= 0.6; p.rotV *= 0.5; }
+    if (p.t > p.life) particles.splice(i, 1);
+  }
+}
+
+// The short "thrown in jail" cutscene: world frozen, Dark Lord pounds the bars.
+function updateCutscene(dt) {
+  const c = cutscene;
+  c.t += dt;
+  c.fade = clamp(Math.min(c.t / 0.4, (c.dur - c.t) / 0.5), 0, 1);   // ease the dim in and out
+  c.bang = Math.max(0, c.bang - dt * 6);                            // decay the punch pose
+  c.bangT -= dt;
+  if (c.bangT <= 0 && c.t < c.dur - 0.35) {                         // a fresh slam on the bars
+    c.bangT = rand(0.32, 0.52);
+    c.bang = 1;
+    shake = Math.max(shake, 8);
+    Sound.bonk();
+    for (let i = 0; i < 7; i++) addParticle({ kind: 'spark', x: c.x + rand(-30, 30), y: c.y - rand(18, 80),
+      vx: rand(-130, 130), vy: rand(-170, -20), life: rand(0.3, 0.7), size: rand(2, 4),
+      color: choice(['#9a9aa6', '#cfcfd8', '#6f6f7a']), g: 320 });
+  }
+  stepParticles(dt);
+  shake *= Math.pow(0.0008, dt); if (shake < 0.3) shake = 0;
+  if (c.t >= c.dur) cutscene = null;                                // hand control back to the world
 }
 
 // ----- per-state behavior -----
@@ -819,6 +847,7 @@ function cuffDarkLord(H, DL) {                     // 2.0 cuffs the Dark Lord an
   pencilSparkle(DL.x - 28, DL.y - 24); pencilSparkle(DL.x + 28, DL.y - 24); pencilSparkle(DL.x, DL.y - 56);
   shake = Math.max(shake, 8); Sound.pop();
   flashHint('🔒 The Chosen One 2.0 cuffed the Dark Lord and jailed him!');
+  cutscene = { t: 0, dur: 3.2, x: DL.x, y: DL.y, bangT: 0.25, bang: 0, fade: 0 };   // play the jail cutscene
 }
 function escapeJail(DL) {                          // breaks out after JAIL_TIME, then vanishes
   DL.jailed = false;
@@ -1172,8 +1201,8 @@ function render() {
   // drawn weapons resting on the ground (behind the figures)
   for (const w of weapons) if (!w.held) drawGroundWeapon(w);
 
-  // figures
-  for (const f of figures) drawFigure(f);
+  // figures (the Dark Lord is redrawn on top during the jail cutscene)
+  for (const f of figures) { if (cutscene && f === darkLordRef) continue; drawFigure(f); }
 
   // arrows in flight (above the figures)
   for (const a of arrows) drawArrow(a);
@@ -1193,6 +1222,9 @@ function render() {
 
   // the tool the cursor is "holding"
   drawCursorTool();
+
+  // jail cutscene composited on top of everything
+  if (cutscene) drawCutscene();
 }
 
 let cloudT = 0;
@@ -1298,6 +1330,12 @@ function drawArms(f, shoulderY) {
 
   if (f.special === 'chosen' && f.unleashT > 0) {
     swingArm(1.55, 12, 13, 0.15); swingArm(1.95, 12, 13, 0.15);   // both arms thrust forward (fire)
+    return;
+  }
+  if (f.special === 'darklord' && f.jailed && cutscene) {          // pounding on the bars
+    const j = cutscene.bang || 0, len = lerp(11, 16, j);
+    swingArm(1.5, 12, len, -0.1 - j * 0.25);
+    swingArm(-1.5, 12, len, 0.1 + j * 0.25);
     return;
   }
   if (f.special && f.heldWeapon) {
@@ -1466,7 +1504,8 @@ function drawArrow(a) {
 }
 // A drawn jail cell around a captured Dark Lord, plus cuffs on his wrists.
 function drawJail(f) {
-  const cx = f.x, gy = f.y, w = 60, top = gy - 94;
+  const jolt = (cutscene && cutscene.bang) ? rand(-1, 1) * cutscene.bang * 3 : 0;   // bars rattle on a bang
+  const cx = f.x + jolt, gy = f.y, w = 60, top = gy - 94;
   ctx.save();
   ctx.strokeStyle = '#34343d'; ctx.lineWidth = 3.5; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
   ctx.strokeRect(cx - w / 2, top, w, gy - top);
@@ -1485,6 +1524,51 @@ function drawProtest(f) {
   ctx.fillStyle = '#ffffff'; ctx.fill();
   ctx.lineWidth = 1.6; ctx.strokeStyle = f.color; ctx.stroke();
   ctx.fillStyle = f.color; ctx.fillText(txt, left + padX, y);
+  ctx.restore();
+}
+// The jail cutscene: dim + spotlight the cell, draw the banging Dark Lord and his shout on top.
+function drawCutscene() {
+  const c = cutscene, a = c.fade, DL = darkLordRef;
+  if (!DL) return;
+  ctx.save();
+  ctx.fillStyle = 'rgba(8,6,14,' + (0.62 * a) + ')';        // dim the rest of the world
+  ctx.fillRect(0, 0, W, H);
+  const g = ctx.createRadialGradient(c.x, c.y - 52, 12, c.x, c.y - 52, 165);   // warm spotlight on the cell
+  g.addColorStop(0, 'rgba(255,80,96,' + (0.30 * a) + ')');
+  g.addColorStop(1, 'rgba(255,80,96,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+  // the Dark Lord + rattling cell, shaken on each impact
+  ctx.save();
+  if (shake > 0) ctx.translate(rand(-shake, shake), rand(-shake, shake));
+  drawFigure(DL);
+  drawAngryFace(DL.x, DL.y - figHeight(DL) + 9);
+  ctx.restore();
+  drawCutsceneShout(c, a);
+}
+function drawAngryFace(x, y) {
+  ctx.save(); ctx.translate(x, y);
+  ctx.strokeStyle = '#ff1130'; ctx.fillStyle = '#ff1130'; ctx.lineWidth = 1.8; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-5.5, -2.8); ctx.lineTo(-1.4, -0.6); ctx.stroke();   // angled brows
+  ctx.beginPath(); ctx.moveTo(5.5, -2.8); ctx.lineTo(1.4, -0.6); ctx.stroke();
+  ctx.beginPath(); ctx.arc(-3, 1, 1.1, 0, 7); ctx.fill();                          // eyes
+  ctx.beginPath(); ctx.arc(3, 1, 1.1, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(-4, 5); ctx.lineTo(4, 5); ctx.stroke();              // gritted mouth
+  ctx.beginPath(); ctx.moveTo(-2.4, 4); ctx.lineTo(-2.4, 6); ctx.moveTo(0, 4); ctx.lineTo(0, 6); ctx.moveTo(2.4, 4); ctx.lineTo(2.4, 6); ctx.stroke();
+  ctx.restore();
+}
+function drawCutsceneShout(c, a) {
+  const txt = 'LET ME OUT! 😡';
+  ctx.save(); ctx.globalAlpha = a;
+  ctx.font = '800 18px -apple-system, system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const tw = ctx.measureText(txt).width, padX = 13, bw = tw + padX * 2, bh = 32;
+  const cx = clamp(c.x, bw / 2 + 6, W - bw / 2 - 6), cy = c.y - 116;
+  const punch = 1 + (c.bang || 0) * 0.07;
+  ctx.translate(cx, cy); ctx.scale(punch, punch);
+  rrect(-bw / 2, -bh / 2, bw, bh, 10);
+  ctx.fillStyle = '#ffffff'; ctx.fill();
+  ctx.lineWidth = 2.6; ctx.strokeStyle = '#ff2b4d'; ctx.stroke();
+  ctx.fillStyle = '#d11331'; ctx.fillText(txt, 0, 0);
   ctx.restore();
 }
 
@@ -1672,6 +1756,7 @@ cv.addEventListener('pointerleave', () => { mouse.inside = false; });
 cv.addEventListener('pointerdown', e => {
   cv.setPointerCapture(e.pointerId);
   Sound.ensure(); Sound.resume();
+  if (cutscene) return;                             // input is frozen while the jail cutscene plays
   const p = pointerPos(e); mouse.x = p.x; mouse.y = p.y; mouse.px = p.x; mouse.py = p.y;
   mouse.down = true; mouse.inside = true;
   mouse.dragVx = 0; mouse.dragVy = 0; mouse.lastMoveT = performance.now();   // fresh velocity for this gesture
