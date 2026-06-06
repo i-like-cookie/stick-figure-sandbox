@@ -74,7 +74,7 @@
   <button class="mini" id="resetBtn" title="Reset world">🔄</button>
 </div>
 
-<div id="hint">Pick a tool above. <b class="k">Tip:</b> while holding the hammer or saber, the stick figures may leap up and <b class="k">snatch it</b> to bash each other — lift your cursor toward the top of the screen to keep it safe. Click an armed figure to grab it back. With <b class="k">🏷️ Name</b>, click a figure to nickname it. Watch for <b class="k">The Chosen One</b> &amp; <b class="k">The Dark Lord</b> — and use <b class="k">✏️ Pencil</b> to sketch weapons for The Chosen One 2.0. Don't let the Dark Lord catch your cursor!</div>
+<div id="hint">Pick a tool above. <b class="k">Tip:</b> while holding the hammer or saber, the stick figures may leap up and <b class="k">snatch it</b> to bash each other — lift your cursor toward the top of the screen to keep it safe. Click an armed figure to grab it back. With <b class="k">🏷️ Name</b>, click a figure to nickname it. Watch for <b class="k">The Chosen One</b> &amp; <b class="k">The Dark Lord</b> — and use <b class="k">✏️ Pencil</b> to sketch weapons for The Chosen One 2.0 — or draw <b class="k">handcuffs</b> (two linked loops) and he'll jail the Dark Lord! Don't let the Dark Lord catch your cursor.</div>
 
 <input id="nameInput" maxlength="14" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="name…" />
 
@@ -225,6 +225,7 @@ const SPECIALS = {
 const DL_HP = 4;             // Dark Lord hit points per rampage
 const DL_PERIOD = 120;       // 2 minutes between attacks
 const DL_FIRST = 120;        // he stays away until the first 2 minutes are up
+const JAIL_TIME = 180;       // 3 minutes locked up before he escapes
 
 let tool = 'drag';
 let paintColor = PAINT_COLORS[0];
@@ -297,6 +298,8 @@ function makeFigure(x, fromEdge) {
     heldWeapon: null, wtarget: 0, wT: 0,
     absent: false,                 // Dark Lord is off-world between attacks
     alt: 0, altTarget: 0, flyT: 0, // flight altitude (heroes can fly)
+    jailed: false, jailT: 0, jailX: 0,   // Dark Lord captured & jailed
+    protest: 0,                    // "stop it" message timer (heroes, when attacked)
   };
   pickWander(f);
   return f;
@@ -699,11 +702,15 @@ function updateBattle(dt) {
     if (f.drawCool > 0) f.drawCool -= dt;
     if (f.unleashT > 0) f.unleashT -= dt;
     if (f.clashCool > 0) f.clashCool -= dt;
+    if (f.protest > 0) f.protest -= dt;
     if (f.down) { f.regenT -= dt; f.aura = clamp(1 - f.regenT / f.regenWait, 0, 1); if (f.regenT <= 0) reviveSpecial(f); }
   }
 
-  // --- The Dark Lord (absent between attacks; appears every DL_PERIOD) ---
-  if (DL.absent) {
+  // --- The Dark Lord (jailed / absent between attacks / rampaging) ---
+  if (DL.jailed) {
+    DL.jailT -= dt;
+    if (DL.jailT <= 0) escapeJail(DL);
+  } else if (DL.absent) {
     DL.attackT -= dt;
     if (DL.attackT <= 0) spawnDarkLord(DL);
   } else {                                        // present & rampaging
@@ -722,7 +729,7 @@ function updateBattle(dt) {
   }
 
   // --- the heroes (they can fly) ---
-  const rampaging = !DL.absent;
+  const rampaging = !DL.absent && !DL.jailed;
   for (const H of [chosenRef, chosen2Ref]) {
     if (!H || H.down) continue;
     if (rampaging) {
@@ -783,13 +790,53 @@ function endRampage(DL) {                          // vanish until the next atta
 function resolveClash(a, b) {
   const DL = a.special === 'darklord' ? a : b;
   const H  = a.special === 'darklord' ? b : a;
-  if (!DL || !H || DL.absent || DL.down || H.down) return;
+  if (!DL || !H || DL.absent || DL.down || DL.jailed || H.down) return;
   DL.clashCool = 0.8; H.clashCool = 0.8;
+  // capture path: handcuffs win the clash outright (no hero knockdown, no damage)
+  if (H.power === 'drawn' && H.heldWeapon && H.heldWeapon.type === 'cuffs') { cuffDarkLord(H, DL); return; }
   if (H.power === 'blast' && H.powerCool <= 0) heroBlast(H, DL);
   else if (H.power === 'drawn' && H.heldWeapon) heroBash(H, DL);
   DL.swing = 1;
   knockDown(H);                                   // the Dark Lord strikes the hero down
   if (DL.hp <= 0) defeatDarkLord(DL);
+}
+function cuffDarkLord(H, DL) {                     // 2.0 cuffs the Dark Lord and draws a jail
+  const w = H.heldWeapon; H.heldWeapon = null;
+  const i = weapons.indexOf(w); if (i >= 0) weapons.splice(i, 1);   // consume the cuffs
+  H.swing = 0;
+  DL.jailed = true; DL.absent = false; DL.jailT = JAIL_TIME; DL.jailX = DL.x;
+  DL.sstate = 'jailed'; DL.targetId = null; DL.swing = 0;
+  pencilSparkle(DL.x - 28, DL.y - 24); pencilSparkle(DL.x + 28, DL.y - 24); pencilSparkle(DL.x, DL.y - 56);
+  shake = Math.max(shake, 8); Sound.pop();
+  flashHint('🔒 The Chosen One 2.0 cuffed the Dark Lord and jailed him!');
+}
+function escapeJail(DL) {                          // breaks out after JAIL_TIME, then vanishes
+  DL.jailed = false;
+  for (let i = 0; i < 16; i++) addParticle({ kind: 'piece', piece: choice(['arm', 'torso']),
+    x: DL.jailX + rand(-30, 30), y: DL.y - rand(8, 64), vx: rand(-220, 220), vy: rand(-280, -40),
+    life: rand(0.6, 1.2), color: '#3a3a44', rot: rand(0, 6.28), rotV: rand(-12, 12), g: 900, floor: groundY });
+  shake = Math.max(shake, 12); Sound.slice();
+  flashHint('🗝️ The Dark Lord escaped!');
+  endRampage(DL);                                 // he vanishes; the normal 2-min timer resumes
+}
+
+// Does a pencil stroke look like handcuffs (~two loops/circles)?
+function looksLikeCuffs(pts) {
+  let minx = 1e9, maxx = -1e9, miny = 1e9, maxy = -1e9;
+  for (const p of pts) { minx = Math.min(minx, p.x); maxx = Math.max(maxx, p.x); miny = Math.min(miny, p.y); maxy = Math.max(maxy, p.y); }
+  const diag = Math.hypot(maxx - minx, maxy - miny);
+  if (diag < 40 || pts.length < 8) return false;
+  const near = Math.max(14, 0.16 * diag);
+  const minArc = Math.max(6, Math.floor(pts.length * 0.12));
+  let loops = 0, i = minArc;
+  while (i < pts.length) {                          // count how many times the path closes a loop
+    let found = false;
+    for (let j = 0; j <= i - minArc; j++) {
+      if (Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y) < near) { found = true; break; }
+    }
+    if (found) { loops++; i += minArc; } else i++;
+  }
+  return loops >= 2;
 }
 function heroBlast(H, DL) {                        // laser eyes + fire from the hands
   DL.hp -= 2; H.powerCool = 6; H.unleashT = 0.9; H.blastTargetX = DL.x; H.blastTargetY = DL.y - 30; H.sstate = 'blast';
@@ -827,15 +874,21 @@ function defeatDarkLord(DL) {                      // big finish, then he vanish
 
 // orange picks up the nearest grounded drawn weapon, or sketches his own
 function acquireWeapon(H, dt) {
-  let best = null, bd = 600;
-  for (const w of weapons) { if (w.held || !w.onGround) continue; const d = Math.abs(w.x - H.x); if (d < bd) { bd = d; best = w; } }
+  // prefer handcuffs (capture) over any weapon
+  let best = null, bd = 1e9, bestCuffs = false;
+  for (const w of weapons) {
+    if (w.held || !w.onGround) continue;
+    const isC = w.type === 'cuffs', d = Math.abs(w.x - H.x);
+    if (isC && !bestCuffs) { best = w; bd = d; bestCuffs = true; }
+    else if (isC === bestCuffs && d < bd) { best = w; bd = d; }
+  }
   if (best) {
     faceTo(H, best.x); H.sstate = 'fetch';
     if (Math.abs(best.x - H.x) > 16) { H.x += H.facing * 120 * dt; H.walk += dt * 13; }
     else { best.held = true; H.heldWeapon = best; }
     return;
   }
-  if (H.drawCool <= 0) {
+  if (H.drawCool <= 0) {                            // draws his own weapon (never cuffs)
     const w = makeDrawnWeapon(H.x + H.facing * 14, groundY - 2, null);
     w.held = true; H.heldWeapon = w; weapons.push(w);
     H.drawCool = 4; H.sstate = 'draw'; pencilSparkle(H.x + H.facing * 14, H.y - 30);
@@ -849,7 +902,7 @@ function makeDrawnWeapon(x, y, pts) {
     pts.push({ x: 0, y: -len * 0.72 }); pts.push({ x: 0, y: -len });
   }
   let r = 8; for (const p of pts) r = Math.max(r, Math.hypot(p.x, p.y));
-  return { x, y, pts, r, held: false, onGround: true, vy: 0 };
+  return { x, y, pts, r, held: false, onGround: true, vy: 0, type: 'weapon' };
 }
 function updateWeapons(dt) {
   for (const w of weapons) {
@@ -885,11 +938,14 @@ function finishPencil() {
   if (!pts || pts.length < 2) return;
   let cx = 0, cy = 0; for (const p of pts) { cx += p.x; cy += p.y; } cx /= pts.length; cy /= pts.length;
   const local = pts.map(p => ({ x: p.x - cx, y: p.y - cy }));
+  const cuffs = looksLikeCuffs(pts);               // two loops -> handcuffs
   const w = makeDrawnWeapon(cx, Math.min(cy, groundY - 2), local);
+  w.type = cuffs ? 'cuffs' : 'weapon';
   w.onGround = Math.abs(cy - (groundY - 2)) < 8;   // drawn near the ground? already there, else it drops
   weapons.push(w);
   while (weapons.length > 12) { const idx = weapons.findIndex(x => !x.held); if (idx < 0) break; weapons.splice(idx, 1); }
   pencilSparkle(cx, cy); Sound.pop();
+  if (cuffs) flashHint('🔗 Handcuffs! The Chosen One 2.0 will cuff the Dark Lord with these.');
 }
 
 // ====================================================================
@@ -1108,6 +1164,11 @@ function drawFigure(f) {
   if (f.nameState === 'cheer') reactionFace(f, '😍');
   else if (f.nameState === 'reject') reactionFace(f, f.nameProfane ? '🤢' : '😖');
 
+  // jail cell + handcuffs on a captured Dark Lord
+  if (f.jailed) drawJail(f);
+  // "stop it" protest when a Chosen One is attacked
+  if (f.protest > 0) drawProtest(f);
+
   function leg(topY, swing) {
     const kneeX = swing * 7, footX = swing * 13;
     ctx.beginPath(); ctx.moveTo(0, topY);
@@ -1129,9 +1190,11 @@ function drawArms(f, shoulderY) {
   }
   if (f.special && f.heldWeapon) {
     swingArm(-2.5, 11, 12, -0.4);                                 // off-hand
-    const ang = lerp(2.2, 0.55, f.swing);                         // overhead -> swing down
+    const cuffs = f.heldWeapon.type === 'cuffs';
+    const ang = cuffs ? 1.7 : lerp(2.2, 0.55, f.swing);          // cuffs held out; weapon swings down
     const hand = swingArm(ang, 12, 13, 0.3);
-    drawHeldDrawnWeapon(hand.x, hand.y, ang, f.heldWeapon, f.facing);
+    if (cuffs) drawCuffsIcon(hand.x, hand.y, 0.7);
+    else drawHeldDrawnWeapon(hand.x, hand.y, ang, f.heldWeapon, f.facing);
     return;
   }
   if (f.alt > 12) {                                                // swept-back flight pose
@@ -1233,11 +1296,45 @@ function drawHeldDrawnWeapon(x, y, ang, w, facing) {
   ctx.stroke(); ctx.restore();
 }
 function drawGroundWeapon(w) {
+  if (w.type === 'cuffs') { drawCuffsIcon(w.x, w.y - 6, 1); return; }
   ctx.save(); ctx.translate(w.x, w.y);
   ctx.strokeStyle = '#33333d'; ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
   ctx.beginPath();
   for (let i = 0; i < w.pts.length; i++) { i === 0 ? ctx.moveTo(w.pts[i].x, w.pts[i].y) : ctx.lineTo(w.pts[i].x, w.pts[i].y); }
   ctx.stroke(); ctx.restore();
+}
+
+// A handcuffs glyph: two linked rings.
+function drawCuffsIcon(x, y, s) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  ctx.strokeStyle = '#2b2b33'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.arc(-8, 0, 6.5, 0, 7); ctx.stroke();
+  ctx.beginPath(); ctx.arc(8, 0, 6.5, 0, 7); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-1.5, 0); ctx.lineTo(1.5, 0); ctx.stroke();   // chain
+  ctx.restore();
+}
+// A drawn jail cell around a captured Dark Lord, plus cuffs on his wrists.
+function drawJail(f) {
+  const cx = f.x, gy = f.y, w = 60, top = gy - 94;
+  ctx.save();
+  ctx.strokeStyle = '#34343d'; ctx.lineWidth = 3.5; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.strokeRect(cx - w / 2, top, w, gy - top);
+  for (let i = 1; i < 5; i++) { const bx = cx - w / 2 + (w / 5) * i; ctx.beginPath(); ctx.moveTo(bx, top); ctx.lineTo(bx, gy); ctx.stroke(); }
+  ctx.restore();
+  drawCuffsIcon(cx, gy - 42, 0.85);
+}
+// "stop it" speech bubble in the Chosen One's own colour.
+function drawProtest(f) {
+  const a = clamp(f.protest / 0.4, 0, 1), y = f.y - figHeight(f) - 30;
+  ctx.save(); ctx.globalAlpha = a;
+  ctx.font = '600 13px -apple-system, system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  const txt = 'stop it', tw = ctx.measureText(txt).width, padX = 8, bw = tw + padX * 2, bh = 20;
+  const left = clamp(f.x, bw / 2 + 4, W - bw / 2 - 4) - bw / 2;
+  rrect(left, y - bh / 2, bw, bh, 7);
+  ctx.fillStyle = '#ffffff'; ctx.fill();
+  ctx.lineWidth = 1.6; ctx.strokeStyle = f.color; ctx.stroke();
+  ctx.fillStyle = f.color; ctx.fillText(txt, left + padX, y);
+  ctx.restore();
 }
 
 function drawDizzy(x, y, t) {
@@ -1439,9 +1536,14 @@ cv.addEventListener('pointerdown', e => {
   }
   if (armedHit) { reclaim(armedHit); return; }
 
-  // Attacking a special with an aggressive tool backfires — it catches your cursor.
+  // Attacking a special with an aggressive tool: the Dark Lord erases your cursor;
+  // the Chosen Ones just protest ("stop it") in their own colour.
   const sp = figureAt(p.x, p.y, 30);
-  if (sp && sp.special && (tool === 'hammer' || tool === 'saber' || tool === 'drag')) { catchCursor(); return; }
+  if (sp && sp.special && (tool === 'hammer' || tool === 'saber' || tool === 'drag')) {
+    if (sp.special === 'darklord') { if (!sp.jailed) catchCursor(); }   // a jailed Dark Lord can't curse you from behind bars
+    else { sp.protest = 1.8; Sound.nope(); }
+    return;
+  }
 
   if (tool === 'drag') {
     const f = figureAt(p.x, p.y, 30);
